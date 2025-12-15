@@ -272,14 +272,23 @@
     
     ws.onerror = (error) => {
       console.error('WebSocket error:', error);
-      updateStatus('Connection error', 'disconnected');
-      addSystemMessage('Connection error. Please refresh the page.');
+      // Only show error if P2P connection isn't established
+      if (!dataChannel || dataChannel.readyState !== 'open') {
+        updateStatus('Connection error', 'disconnected');
+        addSystemMessage('Connection error. Please refresh the page.');
+      }
     };
     
     ws.onclose = () => {
       console.log('Disconnected from signaling server');
-      updateStatus('Disconnected', 'disconnected');
-      disableChat();
+      // Only disable chat if P2P connection isn't established
+      if (!dataChannel || dataChannel.readyState !== 'open') {
+        updateStatus('Disconnected', 'disconnected');
+        disableChat();
+      } else {
+        updateStatus('Connected (P2P - Server offline)', 'connected');
+        addSystemMessage('Signaling server disconnected, but P2P connection remains active.');
+      }
     };
     
     // Setup WebRTC peer connection
