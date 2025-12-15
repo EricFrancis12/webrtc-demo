@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC P2P Chat Demo</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    
+    .container {
+      background: white;
+      border-radius: 15px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      width: 100%;
+      max-width: 600px;
+      height: 80vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 20px;
+      text-align: center;
+    }
+    
+    .header h1 {
+      font-size: 24px;
+      margin-bottom: 5px;
+    }
+    
+    .status {
+      font-size: 14px;
+      opacity: 0.9;
+      margin-top: 5px;
+    }
+    
+    .status.waiting {
+      color: #ffd700;
+    }
+    
+    .status.connected {
+      color: #90ee90;
+    }
+    
+    .status.disconnected {
+      color: #ffcccb;
+    }
+    
+    .messages {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      background: #f5f5f5;
+    }
+    
+    .message {
+      margin-bottom: 15px;
+      display: flex;
+      animation: slideIn 0.3s ease;
+    }
+    
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    
+    .message.sent {
+      justify-content: flex-end;
+    }
+    
+    .message.received {
+      justify-content: flex-start;
+    }
+    
+    .message.system {
+      justify-content: center;
+    }
+    
+    .message-content {
+      max-width: 70%;
+      padding: 12px 16px;
+      border-radius: 18px;
+      word-wrap: break-word;
+    }
+    
+    .message.sent .message-content {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border-bottom-right-radius: 5px;
+    }
+    
+    .message.received .message-content {
+      background: white;
+      color: #333;
+      border-bottom-left-radius: 5px;
+      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    }
+    
+    .message.system .message-content {
+      background: #e0e0e0;
+      color: #666;
+      font-size: 13px;
+      font-style: italic;
+      padding: 8px 12px;
+    }
+    
+    .input-area {
+      padding: 20px;
+      background: white;
+      border-top: 1px solid #e0e0e0;
+      display: flex;
+      gap: 10px;
+    }
+    
+    #messageInput {
+      flex: 1;
+      padding: 12px 16px;
+      border: 2px solid #e0e0e0;
+      border-radius: 25px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.3s;
+    }
+    
+    #messageInput:focus {
+      border-color: #667eea;
+    }
+    
+    #messageInput:disabled {
+      background: #f5f5f5;
+      cursor: not-allowed;
+    }
+    
+    #sendButton {
+      padding: 12px 30px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 25px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    
+    #sendButton:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+    }
+    
+    #sendButton:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    
+    #sendButton:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>WebRTC P2P Chat</h1>
+      <div id="status" class="status disconnected">Connecting to server...</div>
+    </div>
+    
+    <div id="messages" class="messages">
+      <div class="message system">
+        <div class="message-content">Welcome! Waiting for another peer to connect...</div>
+      </div>
+    </div>
+    
+    <div class="input-area">
+      <input 
+        type="text" 
+        id="messageInput" 
+        placeholder="Type a message..." 
+        disabled
+      />
+      <button id="sendButton" disabled>Send</button>
+    </div>
+  </div>
+
+  <script>
+    // WebSocket connection to signaling server
+    const ws = new WebSocket('ws://localhost:3000');
+    
+    // WebRTC connection
+    let peerConnection = null;
+    let dataChannel = null;
+    let isInitiator = false;
+    
+    // UI elements
+    const messagesDiv = document.getElementById('messages');
+    const messageInput = document.getElementById('messageInput');
+    const sendButton = document.getElementById('sendButton');
+    const statusDiv = document.getElementById('status');
+    
+    // ICE servers configuration (using public STUN servers)
+    const configuration = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    };
+    
+    // WebSocket event handlers
+    ws.onopen = () => {
+      console.log('Connected to signaling server');
+      updateStatus('Waiting for peer...', 'waiting');
+      ws.send(JSON.stringify({ type: 'join' }));
+    };
+    
+    ws.onmessage = async (event) => {
+      const data = JSON.parse(event.data);
+      console.log('Received from server:', data.type);
+      
+      switch (data.type) {
+        case 'waiting':
+          updateStatus('Waiting for peer...', 'waiting');
+          addSystemMessage('Waiting for another user to join...');
+          break;
+          
+        case 'ready':
+          isInitiator = data.initiator;
+          updateStatus('Peer found! Establishing connection...', 'waiting');
+          addSystemMessage('Peer found! Setting up secure connection...');
+          await setupPeerConnection();
+          break;
+          
+        case 'offer':
+          await handleOffer(data.offer);
+          break;
+          
+        case 'answer':
+          await handleAnswer(data.answer);
+          break;
+          
+        case 'ice-candidate':
+          await handleIceCandidate(data.candidate);
+          break;
+          
+        case 'peer-disconnected':
+          handlePeerDisconnect();
+          break;
+      }
+    };
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      updateStatus('Connection error', 'disconnected');
+      addSystemMessage('Connection error. Please refresh the page.');
+    };
+    
+    ws.onclose = () => {
+      console.log('Disconnected from signaling server');
+      updateStatus('Disconnected', 'disconnected');
+      disableChat();
+    };
+    
+    // Setup WebRTC peer connection
+    async function setupPeerConnection() {
+      peerConnection = new RTCPeerConnection(configuration);
+      
+      // ICE candidate handling
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          ws.send(JSON.stringify({
+            type: 'ice-candidate',
+            candidate: event.candidate
+          }));
+        }
+      };
+      
+      // Connection state monitoring
+      peerConnection.onconnectionstatechange = () => {
+        console.log('Connection state:', peerConnection.connectionState);
+        if (peerConnection.connectionState === 'connected') {
+          updateStatus('Connected (P2P)', 'connected');
+          addSystemMessage('Connected! Messages now go directly peer-to-peer.');
+        } else if (peerConnection.connectionState === 'disconnected' || 
+                   peerConnection.connectionState === 'failed') {
+          handlePeerDisconnect();
+        }
+      };
+      
+      if (isInitiator) {
+        // Create data channel (initiator only)
+        dataChannel = peerConnection.createDataChannel('chat');
+        setupDataChannel();
+        
+        // Create and send offer
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        ws.send(JSON.stringify({
+          type: 'offer',
+          offer: offer
+        }));
+      } else {
+        // Listen for data channel (receiver)
+        peerConnection.ondatachannel = (event) => {
+          dataChannel = event.channel;
+          setupDataChannel();
+        };
+      }
+    }
+    
+    // Setup data channel event handlers
+    function setupDataChannel() {
+      dataChannel.onopen = () => {
+        console.log('Data channel opened');
+        enableChat();
+      };
+      
+      dataChannel.onclose = () => {
+        console.log('Data channel closed');
+        disableChat();
+      };
+      
+      dataChannel.onmessage = (event) => {
+        addMessage(event.data, 'received');
+      };
+      
+      dataChannel.onerror = (error) => {
+        console.error('Data channel error:', error);
+      };
+    }
+    
+    // Handle WebRTC offer
+    async function handleOffer(offer) {
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      ws.send(JSON.stringify({
+        type: 'answer',
+        answer: answer
+      }));
+    }
+    
+    // Handle WebRTC answer
+    async function handleAnswer(answer) {
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+    }
+    
+    // Handle ICE candidate
+    async function handleIceCandidate(candidate) {
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (error) {
+        console.error('Error adding ICE candidate:', error);
+      }
+    }
+    
+    // Handle peer disconnect
+    function handlePeerDisconnect() {
+      updateStatus('Peer disconnected', 'disconnected');
+      addSystemMessage('Peer disconnected. Refresh to find a new peer.');
+      disableChat();
+      if (peerConnection) {
+        peerConnection.close();
+      }
+    }
+    
+    // UI functions
+    function addMessage(text, type) {
+      const messageDiv = document.createElement('div');
+      messageDiv.className = `message ${type}`;
+      
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'message-content';
+      contentDiv.textContent = text;
+      
+      messageDiv.appendChild(contentDiv);
+      messagesDiv.appendChild(messageDiv);
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+    
+    function addSystemMessage(text) {
+      addMessage(text, 'system');
+    }
+    
+    function updateStatus(text, statusClass) {
+      statusDiv.textContent = text;
+      statusDiv.className = `status ${statusClass}`;
+    }
+    
+    function enableChat() {
+      messageInput.disabled = false;
+      sendButton.disabled = false;
+      messageInput.focus();
+    }
+    
+    function disableChat() {
+      messageInput.disabled = true;
+      sendButton.disabled = true;
+    }
+    
+    function sendMessage() {
+      const message = messageInput.value.trim();
+      if (message && dataChannel && dataChannel.readyState === 'open') {
+        dataChannel.send(message);
+        addMessage(message, 'sent');
+        messageInput.value = '';
+      }
+    }
+    
+    // Event listeners
+    sendButton.addEventListener('click', sendMessage);
+    
+    messageInput.addEventListener('keypress', (event) => {
+      if (event.key === 'Enter') {
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>
