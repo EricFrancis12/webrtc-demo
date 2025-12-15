@@ -123,6 +123,5 @@ function handleDisconnect(ws) {
 }
 
 server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log(`WebSocket server ready on ws://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });

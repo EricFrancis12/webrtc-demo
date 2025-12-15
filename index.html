@@ -207,7 +207,7 @@
 
   <script>
     // WebSocket connection to signaling server
-    const ws = new WebSocket("ws://localhost:3000");
+    const ws = new WebSocket(`ws://${window.location.hostname}`);
     
     // WebRTC connection
     let peerConnection = null;
