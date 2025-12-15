@@ -12,7 +12,7 @@
     }
     
     body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       height: 100vh;
       display: flex;
@@ -207,7 +207,7 @@
 
   <script>
     // WebSocket connection to signaling server
-    const ws = new WebSocket('ws://localhost:3000');
+    const ws = new WebSocket("ws://localhost:3000");
     
     // WebRTC connection
     let peerConnection = null;
@@ -215,79 +215,79 @@
     let isInitiator = false;
     
     // UI elements
-    const messagesDiv = document.getElementById('messages');
-    const messageInput = document.getElementById('messageInput');
-    const sendButton = document.getElementById('sendButton');
-    const statusDiv = document.getElementById('status');
+    const messagesDiv = document.getElementById("messages");
+    const messageInput = document.getElementById("messageInput");
+    const sendButton = document.getElementById("sendButton");
+    const statusDiv = document.getElementById("status");
     
     // ICE servers configuration (using public STUN servers)
     const configuration = {
       iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" }
       ]
     };
     
     // WebSocket event handlers
     ws.onopen = () => {
-      console.log('Connected to signaling server');
-      updateStatus('Waiting for peer...', 'waiting');
-      ws.send(JSON.stringify({ type: 'join' }));
+      console.log("Connected to signaling server");
+      updateStatus("Waiting for peer...", "waiting");
+      ws.send(JSON.stringify({ type: "join" }));
     };
     
     ws.onmessage = async (event) => {
       const data = JSON.parse(event.data);
-      console.log('Received from server:', data.type);
+      console.log("Received from server:", data.type);
       
       switch (data.type) {
-        case 'waiting':
-          updateStatus('Waiting for peer...', 'waiting');
-          addSystemMessage('Waiting for another user to join...');
+        case "waiting":
+          updateStatus("Waiting for peer...", "waiting");
+          addSystemMessage("Waiting for another user to join...");
           break;
           
-        case 'ready':
+        case "ready":
           isInitiator = data.initiator;
-          updateStatus('Peer found! Establishing connection...', 'waiting');
-          addSystemMessage('Peer found! Setting up secure connection...');
+          updateStatus("Peer found! Establishing connection...", "waiting");
+          addSystemMessage("Peer found! Setting up secure connection...");
           await setupPeerConnection();
           break;
           
-        case 'offer':
+        case "offer":
           await handleOffer(data.offer);
           break;
           
-        case 'answer':
+        case "answer":
           await handleAnswer(data.answer);
           break;
           
-        case 'ice-candidate':
+        case "ice-candidate":
           await handleIceCandidate(data.candidate);
           break;
           
-        case 'peer-disconnected':
+        case "peer-disconnected":
           handlePeerDisconnect();
           break;
       }
     };
     
     ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      // Only show error if P2P connection isn't established
-      if (!dataChannel || dataChannel.readyState !== 'open') {
-        updateStatus('Connection error', 'disconnected');
-        addSystemMessage('Connection error. Please refresh the page.');
+      console.error("WebSocket error:", error);
+      // Only show error if P2P connection isn"t established
+      if (!dataChannel || dataChannel.readyState !== "open") {
+        updateStatus("Connection error", "disconnected");
+        addSystemMessage("Connection error. Please refresh the page.");
       }
     };
     
     ws.onclose = () => {
-      console.log('Disconnected from signaling server');
-      // Only disable chat if P2P connection isn't established
-      if (!dataChannel || dataChannel.readyState !== 'open') {
-        updateStatus('Disconnected', 'disconnected');
+      console.log("Disconnected from signaling server");
+      // Only disable chat if P2P connection isn"t established
+      if (!dataChannel || dataChannel.readyState !== "open") {
+        updateStatus("Disconnected", "disconnected");
         disableChat();
       } else {
-        updateStatus('Connected (P2P - Server offline)', 'connected');
-        addSystemMessage('Signaling server disconnected, but P2P connection remains active.');
+        updateStatus("Connected (P2P - Server offline)", "connected");
+        addSystemMessage("Signaling server disconnected, but P2P connection remains active.");
       }
     };
     
@@ -299,7 +299,7 @@
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
           ws.send(JSON.stringify({
-            type: 'ice-candidate',
+            type: "ice-candidate",
             candidate: event.candidate
           }));
         }
@@ -307,26 +307,26 @@
       
       // Connection state monitoring
       peerConnection.onconnectionstatechange = () => {
-        console.log('Connection state:', peerConnection.connectionState);
-        if (peerConnection.connectionState === 'connected') {
-          updateStatus('Connected (P2P)', 'connected');
-          addSystemMessage('Connected! Messages now go directly peer-to-peer.');
-        } else if (peerConnection.connectionState === 'disconnected' || 
-                   peerConnection.connectionState === 'failed') {
+        console.log("Connection state:", peerConnection.connectionState);
+        if (peerConnection.connectionState === "connected") {
+          updateStatus("Connected (P2P)", "connected");
+          addSystemMessage("Connected! Messages now go directly peer-to-peer.");
+        } else if (peerConnection.connectionState === "disconnected" || 
+                   peerConnection.connectionState === "failed") {
           handlePeerDisconnect();
         }
       };
       
       if (isInitiator) {
         // Create data channel (initiator only)
-        dataChannel = peerConnection.createDataChannel('chat');
+        dataChannel = peerConnection.createDataChannel("chat");
         setupDataChannel();
         
         // Create and send offer
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
         ws.send(JSON.stringify({
-          type: 'offer',
+          type: "offer",
           offer: offer
         }));
       } else {
@@ -341,21 +341,21 @@
     // Setup data channel event handlers
     function setupDataChannel() {
       dataChannel.onopen = () => {
-        console.log('Data channel opened');
+        console.log("Data channel opened");
         enableChat();
       };
       
       dataChannel.onclose = () => {
-        console.log('Data channel closed');
+        console.log("Data channel closed");
         disableChat();
       };
       
       dataChannel.onmessage = (event) => {
-        addMessage(event.data, 'received');
+        addMessage(event.data, "received");
       };
       
       dataChannel.onerror = (error) => {
-        console.error('Data channel error:', error);
+        console.error("Data channel error:", error);
       };
     }
     
@@ -365,7 +365,7 @@
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       ws.send(JSON.stringify({
-        type: 'answer',
+        type: "answer",
         answer: answer
       }));
     }
@@ -380,14 +380,14 @@
       try {
         await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (error) {
-        console.error('Error adding ICE candidate:', error);
+        console.error("Error adding ICE candidate:", error);
       }
     }
     
     // Handle peer disconnect
     function handlePeerDisconnect() {
-      updateStatus('Peer disconnected', 'disconnected');
-      addSystemMessage('Peer disconnected. Refresh to find a new peer.');
+      updateStatus("Peer disconnected", "disconnected");
+      addSystemMessage("Peer disconnected. Refresh to find a new peer.");
       disableChat();
       if (peerConnection) {
         peerConnection.close();
@@ -396,11 +396,11 @@
     
     // UI functions
     function addMessage(text, type) {
-      const messageDiv = document.createElement('div');
+      const messageDiv = document.createElement("div");
       messageDiv.className = `message ${type}`;
       
-      const contentDiv = document.createElement('div');
-      contentDiv.className = 'message-content';
+      const contentDiv = document.createElement("div");
+      contentDiv.className = "message-content";
       contentDiv.textContent = text;
       
       messageDiv.appendChild(contentDiv);
@@ -409,7 +409,7 @@
     }
     
     function addSystemMessage(text) {
-      addMessage(text, 'system');
+      addMessage(text, "system");
     }
     
     function updateStatus(text, statusClass) {
@@ -430,18 +430,18 @@
     
     function sendMessage() {
       const message = messageInput.value.trim();
-      if (message && dataChannel && dataChannel.readyState === 'open') {
+      if (message && dataChannel && dataChannel.readyState === "open") {
         dataChannel.send(message);
-        addMessage(message, 'sent');
-        messageInput.value = '';
+        addMessage(message, "sent");
+        messageInput.value = "";
       }
     }
     
     // Event listeners
-    sendButton.addEventListener('click', sendMessage);
+    sendButton.addEventListener("click", sendMessage);
     
-    messageInput.addEventListener('keypress', (event) => {
-      if (event.key === 'Enter') {
+    messageInput.addEventListener("keypress", (event) => {
+      if (event.key === "Enter") {
         sendMessage();
       }
     });

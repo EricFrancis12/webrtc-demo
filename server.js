@@ -1,26 +1,26 @@
-const WebSocket = require('ws');
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
+const WebSocket = require("ws");
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
 
 const PORT = 3000;
 
 // Create HTTP server to serve the client
 const server = http.createServer((req, res) => {
-  if (req.url === '/' || req.url === '/index.html') {
-    const clientPath = path.join(__dirname, 'index.html');
+  if (req.url === "/" || req.url === "/index.html") {
+    const clientPath = path.join(__dirname, "index.html");
     fs.readFile(clientPath, (err, data) => {
       if (err) {
         res.writeHead(500);
-        res.end('Error loading client');
+        res.end("Error loading client");
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.writeHead(200, { "Content-Type": "text/html" });
       res.end(data);
     });
   } else {
     res.writeHead(404);
-    res.end('Not found');
+    res.end("Not found");
   }
 });
 
@@ -30,32 +30,32 @@ const wss = new WebSocket.Server({ server });
 let waitingClient = null;
 let clients = [];
 
-wss.on('connection', (ws) => {
-  console.log('New client connected');
+wss.on("connection", (ws) => {
+  console.log("New client connected");
   
-  ws.on('message', (message) => {
+  ws.on("message", (message) => {
     try {
       const data = JSON.parse(message);
-      console.log('Received:', data.type);
+      console.log("Received:", data.type);
       
       switch (data.type) {
-        case 'join':
+        case "join":
           handleJoin(ws);
           break;
-        case 'offer':
-        case 'answer':
-        case 'ice-candidate':
+        case "offer":
+        case "answer":
+        case "ice-candidate":
           // Forward signaling messages to the peer
           forwardToPeer(ws, data);
           break;
       }
     } catch (error) {
-      console.error('Error handling message:', error);
+      console.error("Error handling message:", error);
     }
   });
   
-  ws.on('close', () => {
-    console.log('Client disconnected');
+  ws.on("close", () => {
+    console.log("Client disconnected");
     handleDisconnect(ws);
   });
 });
@@ -65,8 +65,8 @@ function handleJoin(ws) {
     // First client - wait for another
     waitingClient = ws;
     ws.peerId = null;
-    console.log('First client waiting for peer...');
-    ws.send(JSON.stringify({ type: 'waiting' }));
+    console.log("First client waiting for peer...");
+    ws.send(JSON.stringify({ type: "waiting" }));
   } else {
     // Second client - pair them up
     const peer1 = waitingClient;
@@ -79,21 +79,21 @@ function handleJoin(ws) {
     clients.push({ peer1, peer2 });
     waitingClient = null;
     
-    console.log('Two clients paired! Starting WebRTC handshake...');
+    console.log("Two clients paired! Starting WebRTC handshake...");
     
     // Tell first client to initiate the offer
-    peer1.send(JSON.stringify({ type: 'ready', initiator: true }));
-    peer2.send(JSON.stringify({ type: 'ready', initiator: false }));
+    peer1.send(JSON.stringify({ type: "ready", initiator: true }));
+    peer2.send(JSON.stringify({ type: "ready", initiator: false }));
     
     // Close connections after clients establish P2P (give them 5 seconds for handshake)
     setTimeout(() => {
-      console.log('P2P connection established. Closing signaling connections...');
+      console.log("P2P connection established. Closing signaling connections...");
       if (peer1.readyState === WebSocket.OPEN) {
-        peer1.send(JSON.stringify({ type: 'server-closing' }));
+        peer1.send(JSON.stringify({ type: "server-closing" }));
         peer1.close();
       }
       if (peer2.readyState === WebSocket.OPEN) {
-        peer2.send(JSON.stringify({ type: 'server-closing' }));
+        peer2.send(JSON.stringify({ type: "server-closing" }));
         peer2.close();
       }
     }, 5000);
@@ -114,7 +114,7 @@ function handleDisconnect(ws) {
   
   // Notify peer if connected
   if (ws.peerId && ws.peerId.readyState === WebSocket.OPEN) {
-    ws.peerId.send(JSON.stringify({ type: 'peer-disconnected' }));
+    ws.peerId.send(JSON.stringify({ type: "peer-disconnected" }));
     ws.peerId.peerId = null;
   }
   
