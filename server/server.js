@@ -84,6 +84,19 @@ function handleJoin(ws) {
     // Tell first client to initiate the offer
     peer1.send(JSON.stringify({ type: 'ready', initiator: true }));
     peer2.send(JSON.stringify({ type: 'ready', initiator: false }));
+    
+    // Close connections after clients establish P2P (give them 5 seconds for handshake)
+    setTimeout(() => {
+      console.log('P2P connection established. Closing signaling connections...');
+      if (peer1.readyState === WebSocket.OPEN) {
+        peer1.send(JSON.stringify({ type: 'server-closing' }));
+        peer1.close();
+      }
+      if (peer2.readyState === WebSocket.OPEN) {
+        peer2.send(JSON.stringify({ type: 'server-closing' }));
+        peer2.close();
+      }
+    }, 5000);
   }
 }
 
