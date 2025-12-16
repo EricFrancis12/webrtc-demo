@@ -31,6 +31,21 @@ enum WsMessage {
     ServerClosing,
 }
 
+impl WsMessage {
+    fn variant_name(&self) -> &'static str {
+        match self {
+            WsMessage::Join => "Join",
+            WsMessage::Waiting => "Waiting",
+            WsMessage::Ready { .. } => "Ready",
+            WsMessage::Offer { .. } => "Offer",
+            WsMessage::Answer { .. } => "Answer",
+            WsMessage::IceCandidate { .. } => "IceCandidate",
+            WsMessage::PeerDisconnected => "PeerDisconnected",
+            WsMessage::ServerClosing => "ServerClosing",
+        }
+    }
+}
+
 const PORT: u16 = 3000;
 
 #[tokio::main]
@@ -72,7 +87,8 @@ async fn handle_socket(socket: WebSocket, state: State) {
     // Spawn task to send messages from channel to client
     let mut send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if sender.send(msg).await.is_err() {
+            if let Err(err) = sender.send(msg).await {
+                println!("Error sending message: {err}");
                 break;
             }
         }
@@ -94,28 +110,34 @@ async fn handle_socket(socket: WebSocket, state: State) {
     // Receive messages from client
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
-            if let Message::Text(text) = msg {
-                if let Ok(data) = serde_json::from_str::<WsMessage>(&text) {
-                    println!("Received: {:?}", data);
+            if let Message::Close(_) = msg {
+                break;
+            }
 
-                    match data {
-                        WsMessage::Join => {
-                            handle_join(tx_clone.clone(), peer_tx_sender.clone(), &state_clone)
-                                .await;
-                        }
-                        WsMessage::Offer { .. }
-                        | WsMessage::Answer { .. }
-                        | WsMessage::IceCandidate { .. } => {
-                            let peer_opt = peer_tx_for_recv.lock().await;
-                            if let Some(ref peer) = *peer_opt {
-                                let _ = peer.send(Message::Text(text));
-                            }
-                        }
-                        _ => {}
+            let Message::Text(text) = msg else {
+                println!("[Should not happen] Unhandled message from client: {msg:?}");
+                continue;
+            };
+
+            let Ok(data) = serde_json::from_str::<WsMessage>(&text) else {
+                continue;
+            };
+
+            println!("Received: {}", data.variant_name());
+
+            match data {
+                WsMessage::Join => {
+                    handle_join(tx_clone.clone(), peer_tx_sender.clone(), &state_clone).await;
+                }
+                WsMessage::Offer { .. }
+                | WsMessage::Answer { .. }
+                | WsMessage::IceCandidate { .. } => {
+                    let peer_opt = peer_tx_for_recv.lock().await;
+                    if let Some(ref peer) = *peer_opt {
+                        _ = peer.send(Message::Text(text));
                     }
                 }
-            } else if let Message::Close(_) = msg {
-                break;
+                _ => {}
             }
         }
         peer_tx_for_recv.lock().await.clone()
@@ -128,7 +150,7 @@ async fn handle_socket(socket: WebSocket, state: State) {
             // Notify peer if connected
             if let Ok(Some(peer)) = peer_tx_result {
                 let msg = serde_json::to_string(&WsMessage::PeerDisconnected).unwrap().into();
-                let _ = peer.send(Message::Text(msg));
+                _ = peer.send(Message::Text(msg));
             }
         }
         _ = &mut send_task => {
@@ -146,7 +168,7 @@ async fn handle_join(tx: Tx, peer_tx_sender: PeerTx, state: &State) {
         // First client - wait for another
         println!("First client waiting for peer...");
         let msg = serde_json::to_string(&WsMessage::Waiting).unwrap().into();
-        let _ = tx.send(Message::Text(msg));
+        _ = tx.send(Message::Text(msg));
         *waiting = Some((tx.clone(), peer_tx_sender));
     } else {
         // Second client - pair them up
@@ -156,19 +178,19 @@ async fn handle_join(tx: Tx, peer_tx_sender: PeerTx, state: &State) {
         println!("Two clients paired! Starting WebRTC handshake...");
 
         // Send each client the other's transmitter so they can forward messages
-        let _ = peer1_peer_sender.send(Some(peer2_tx.clone()));
-        let _ = peer_tx_sender.send(Some(peer1_tx.clone()));
+        _ = peer1_peer_sender.send(Some(peer2_tx.clone()));
+        _ = peer_tx_sender.send(Some(peer1_tx.clone()));
 
         // Tell first client to initiate the offer
         let msg1 = serde_json::to_string(&WsMessage::Ready { initiator: true })
             .unwrap()
             .into();
-        let _ = peer1_tx.send(Message::Text(msg1));
+        _ = peer1_tx.send(Message::Text(msg1));
 
         let msg2 = serde_json::to_string(&WsMessage::Ready { initiator: false })
             .unwrap()
             .into();
-        let _ = peer2_tx.send(Message::Text(msg2));
+        _ = peer2_tx.send(Message::Text(msg2));
 
         // Close connections after clients establish P2P (give them 5 seconds for handshake)
         let peer1_clone = peer1_tx.clone();
@@ -180,12 +202,12 @@ async fn handle_join(tx: Tx, peer_tx_sender: PeerTx, state: &State) {
             let msg: Utf8Bytes = serde_json::to_string(&WsMessage::ServerClosing)
                 .unwrap()
                 .into();
-            let _ = peer1_clone.send(Message::Text(msg.clone()));
-            let _ = peer2_clone.send(Message::Text(msg));
+            _ = peer1_clone.send(Message::Text(msg.clone()));
+            _ = peer2_clone.send(Message::Text(msg));
 
             // Close connections by sending Close message
-            let _ = peer1_clone.send(Message::Close(None));
-            let _ = peer2_clone.send(Message::Close(None));
+            _ = peer1_clone.send(Message::Close(None));
+            _ = peer2_clone.send(Message::Close(None));
         });
     }
 }
