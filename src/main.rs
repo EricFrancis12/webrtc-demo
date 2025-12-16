@@ -2,48 +2,39 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
+    extract::ws::{self, Utf8Bytes, WebSocket, WebSocketUpgrade},
     response::{Html, IntoResponse},
     routing::get,
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{
+    Mutex,
+    mpsc::{self, UnboundedSender},
+};
 
-type Tx = mpsc::UnboundedSender<Message>;
-type PeerTx = mpsc::UnboundedSender<Option<Tx>>;
+type PeerTx = UnboundedSender<Option<UnboundedSender<ws::Message>>>;
 
 #[derive(Clone)]
 struct State {
-    waiting_client: Arc<Mutex<Option<(Tx, PeerTx)>>>,
+    waiting_client: Arc<Mutex<Option<(UnboundedSender<ws::Message>, PeerTx)>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
-enum WsMessage {
-    Join,
-    Waiting,
-    Ready { initiator: bool },
+enum MessageFromClient {
+    JoinRequest,
     Offer { offer: serde_json::Value },
     Answer { answer: serde_json::Value },
     IceCandidate { candidate: serde_json::Value },
-    PeerDisconnected,
-    ServerClosing,
 }
 
-impl WsMessage {
-    fn variant_name(&self) -> &'static str {
-        match self {
-            WsMessage::Join => "Join",
-            WsMessage::Waiting => "Waiting",
-            WsMessage::Ready { .. } => "Ready",
-            WsMessage::Offer { .. } => "Offer",
-            WsMessage::Answer { .. } => "Answer",
-            WsMessage::IceCandidate { .. } => "IceCandidate",
-            WsMessage::PeerDisconnected => "PeerDisconnected",
-            WsMessage::ServerClosing => "ServerClosing",
-        }
-    }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum MessageFromServer {
+    WaitingForPartner,
+    PartnersReady { initiator: bool },
+    ServerClosing,
 }
 
 const PORT: u16 = 3000;
@@ -80,23 +71,24 @@ async fn ws_handler(
 async fn handle_socket(socket: WebSocket, state: State) {
     println!("New client connected");
 
-    let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-    let (peer_tx_sender, mut peer_tx_receiver) = mpsc::unbounded_channel::<Option<Tx>>();
+    let (mut socket_sender, mut socket_receiver) = socket.split();
+    let (ws_msg_sender, mut ws_msg_receiver) = mpsc::unbounded_channel::<ws::Message>();
+    let (peer_tx_sender, mut peer_tx_receiver) =
+        mpsc::unbounded_channel::<Option<UnboundedSender<ws::Message>>>();
 
     // Spawn task to send messages from channel to client
     let mut send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if let Err(err) = sender.send(msg).await {
+        while let Some(msg) = ws_msg_receiver.recv().await {
+            if let Err(err) = socket_sender.send(msg).await {
                 println!("Error sending message: {err}");
                 break;
             }
         }
     });
 
-    let tx_clone = tx.clone();
+    let ws_msg_sender_clone = ws_msg_sender.clone();
     let state_clone = state.clone();
-    let peer_tx = Arc::new(Mutex::new(None::<Tx>));
+    let peer_tx = Arc::new(Mutex::new(None::<UnboundedSender<ws::Message>>));
     let peer_tx_clone = peer_tx.clone();
 
     // Listen for peer assignment
@@ -109,49 +101,48 @@ async fn handle_socket(socket: WebSocket, state: State) {
     let peer_tx_for_recv = peer_tx.clone();
     // Receive messages from client
     let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
-            if let Message::Close(_) = msg {
+        while let Some(Ok(msg)) = socket_receiver.next().await {
+            if let ws::Message::Close(_) = msg {
                 break;
             }
 
-            let Message::Text(text) = msg else {
+            let ws::Message::Text(text) = msg else {
                 println!("[Should not happen] Unhandled message from client: {msg:?}");
                 continue;
             };
 
-            let Ok(data) = serde_json::from_str::<WsMessage>(&text) else {
+            let Ok(data) = serde_json::from_str::<MessageFromClient>(&text) else {
                 continue;
             };
 
-            println!("Received: {}", data.variant_name());
-
             match data {
-                WsMessage::Join => {
-                    handle_join(tx_clone.clone(), peer_tx_sender.clone(), &state_clone).await;
+                MessageFromClient::JoinRequest => {
+                    handle_join_request(
+                        ws_msg_sender_clone.clone(),
+                        peer_tx_sender.clone(),
+                        &state_clone,
+                    )
+                    .await;
                 }
-                WsMessage::Offer { .. }
-                | WsMessage::Answer { .. }
-                | WsMessage::IceCandidate { .. } => {
+                MessageFromClient::Offer { .. }
+                | MessageFromClient::Answer { .. }
+                | MessageFromClient::IceCandidate { .. } => {
+                    // Forward messages to the other peer (partner)
                     let peer_opt = peer_tx_for_recv.lock().await;
                     if let Some(ref peer) = *peer_opt {
-                        _ = peer.send(Message::Text(text));
+                        _ = peer.send(ws::Message::Text(text));
                     }
                 }
-                _ => {}
             }
         }
         peer_tx_for_recv.lock().await.clone()
     });
 
-    // Wait for tasks to complete
+    // Wait for either task to complete/fail.
+    // Whichever finishes first causes the other to be aborted.
     tokio::select! {
-        peer_tx_result = &mut recv_task => {
+       _= &mut recv_task => {
             send_task.abort();
-            // Notify peer if connected
-            if let Ok(Some(peer)) = peer_tx_result {
-                let msg = serde_json::to_string(&WsMessage::PeerDisconnected).unwrap().into();
-                _ = peer.send(Message::Text(msg));
-            }
         }
         _ = &mut send_task => {
             recv_task.abort();
@@ -161,19 +152,25 @@ async fn handle_socket(socket: WebSocket, state: State) {
     println!("Client disconnected");
 }
 
-async fn handle_join(tx: Tx, peer_tx_sender: PeerTx, state: &State) {
-    let mut waiting = state.waiting_client.lock().await;
+async fn handle_join_request(
+    ws_msg_sender: UnboundedSender<ws::Message>,
+    peer_tx_sender: PeerTx,
+    state: &State,
+) {
+    let mut waiting_client = state.waiting_client.lock().await;
 
-    if waiting.is_none() {
+    if waiting_client.is_none() {
         // First client - wait for another
         println!("First client waiting for peer...");
-        let msg = serde_json::to_string(&WsMessage::Waiting).unwrap().into();
-        _ = tx.send(Message::Text(msg));
-        *waiting = Some((tx.clone(), peer_tx_sender));
+        let msg = serde_json::to_string(&MessageFromServer::WaitingForPartner)
+            .unwrap()
+            .into();
+        _ = ws_msg_sender.send(ws::Message::Text(msg));
+        *waiting_client = Some((ws_msg_sender.clone(), peer_tx_sender));
     } else {
         // Second client - pair them up
-        let (peer1_tx, peer1_peer_sender) = waiting.take().unwrap();
-        let peer2_tx = tx.clone();
+        let (peer1_tx, peer1_peer_sender) = waiting_client.take().unwrap();
+        let peer2_tx = ws_msg_sender.clone();
 
         println!("Two clients paired! Starting WebRTC handshake...");
 
@@ -182,15 +179,15 @@ async fn handle_join(tx: Tx, peer_tx_sender: PeerTx, state: &State) {
         _ = peer_tx_sender.send(Some(peer1_tx.clone()));
 
         // Tell first client to initiate the offer
-        let msg1 = serde_json::to_string(&WsMessage::Ready { initiator: true })
+        let msg1 = serde_json::to_string(&MessageFromServer::PartnersReady { initiator: true })
             .unwrap()
             .into();
-        _ = peer1_tx.send(Message::Text(msg1));
+        _ = peer1_tx.send(ws::Message::Text(msg1));
 
-        let msg2 = serde_json::to_string(&WsMessage::Ready { initiator: false })
+        let msg2 = serde_json::to_string(&MessageFromServer::PartnersReady { initiator: false })
             .unwrap()
             .into();
-        _ = peer2_tx.send(Message::Text(msg2));
+        _ = peer2_tx.send(ws::Message::Text(msg2));
 
         // Close connections after clients establish P2P (give them 5 seconds for handshake)
         let peer1_clone = peer1_tx.clone();
@@ -199,15 +196,15 @@ async fn handle_join(tx: Tx, peer_tx_sender: PeerTx, state: &State) {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             println!("P2P connection established. Closing signaling connections...");
 
-            let msg: Utf8Bytes = serde_json::to_string(&WsMessage::ServerClosing)
+            let msg: Utf8Bytes = serde_json::to_string(&MessageFromServer::ServerClosing)
                 .unwrap()
                 .into();
-            _ = peer1_clone.send(Message::Text(msg.clone()));
-            _ = peer2_clone.send(Message::Text(msg));
+            _ = peer1_clone.send(ws::Message::Text(msg.clone()));
+            _ = peer2_clone.send(ws::Message::Text(msg));
 
             // Close connections by sending Close message
-            _ = peer1_clone.send(Message::Close(None));
-            _ = peer2_clone.send(Message::Close(None));
+            _ = peer1_clone.send(ws::Message::Close(None));
+            _ = peer2_clone.send(ws::Message::Close(None));
         });
     }
 }

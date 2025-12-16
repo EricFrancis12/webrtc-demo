@@ -233,7 +233,7 @@
     ws.onopen = () => {
       console.log("Connected to signaling server");
       updateStatus("Waiting for peer...", "waiting");
-      ws.send(JSON.stringify({ type: "join" }));
+      ws.send(JSON.stringify({ type: "join-request" }));
     };
     
     ws.onmessage = async (event) => {
@@ -241,12 +241,12 @@
       console.log("Received from server:", data.type);
       
       switch (data.type) {
-        case "waiting":
+        case "waiting-for-partner":
           updateStatus("Waiting for peer...", "waiting");
           addSystemMessage("Waiting for another user to join...");
           break;
           
-        case "ready":
+        case "partners-ready":
           isInitiator = data.initiator;
           updateStatus("Peer found! Establishing connection...", "waiting");
           addSystemMessage("Peer found! Setting up secure connection...");
@@ -267,6 +267,10 @@
           
         case "peer-disconnected":
           handlePeerDisconnect();
+          break;
+
+        case "server-closing":
+          console.log("Server informed that it will be closing");
           break;
       }
     };
