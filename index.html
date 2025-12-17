@@ -56,7 +56,9 @@
                 // Messages from server
                 case "Ok": break;
                 case "BadRequest": break;
-                case "Disconnect": break;
+                case "Disconnect": {
+                    if (ws) ws.close();
+                }; break;
                 case "RoomCreated": {
                     room = {
                         id: msg.room_id,
