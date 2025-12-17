@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
     net::SocketAddr,
-    ops::Range,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use axum::{
@@ -14,23 +14,26 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use futures::{SinkExt, StreamExt, stream::SplitSink};
+use futures::{
+    SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
+};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+use tokio::sync::Mutex;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Client {
     id: String,
     addr: SocketAddr,
     comm: Arc<Mutex<SplitSink<WebSocket, ws::Message>>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Room {
     max_size: usize,
     // password: Option<String>, // TODO: ...
-    host: Client,
-    guests: HashMap<Uuid, Client>,
+    host_id: String,
+    guest_ids: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -45,14 +48,19 @@ enum MessageFromClient {
     GetRooms,
     CreateRoom,
     JoinRoom { room_id: u64 },
+    DeleteRoom { room_id: u64 },
+    StartGame,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum MessageFromServer {
     Ok,
+    RoomCreated,
     BadRequest,
     Disconnect(DisconnectReason),
+    GuestJoined { guest_id: String },
+    JoinedRoom { room: Room },
 }
 
 impl MessageFromServer {
@@ -110,111 +118,191 @@ async fn handle_ws(
     Query(query): Query<WsQuery>,
     extract::State(state): extract::State<State>,
 ) -> impl IntoResponse {
-    println!("HERE");
-
     ws.on_upgrade(async move |socket| {
         let client_id = query.client_id;
         println!("New ws connection from client_id {client_id}");
 
-        let (mut to_client, mut from_client) = socket.split();
+        let (mut to_client, from_client) = socket.split();
 
         if client_id.is_empty() {
             println!("Invalid client_id: {client_id}");
-            _ = to_client.send(MessageFromServer::Disconnect(
-                DisconnectReason::InvalidClientId,
-            ).ws_msg());
+            _ = to_client
+                .send(MessageFromServer::Disconnect(DisconnectReason::InvalidClientId).ws_msg())
+                .await;
             _ = to_client.close();
             return;
         }
 
-        let mut clients = state.clients.lock().unwrap();
+        let mut clients = state.clients.lock().await;
         if clients.contains_key(&client_id) {
             println!("This client_id {client_id} is already taken");
-            _ = to_client.send(MessageFromServer::Disconnect(
-                DisconnectReason::InvalidClientId,
-            ).ws_msg());
+            _ = to_client
+                .send(MessageFromServer::Disconnect(DisconnectReason::ClientIdTaken).ws_msg())
+                .await;
             _ = to_client.close();
             return;
         }
-
-        let client_id = client_id.clone();
-        let state = state.clone();
 
         let to_client = Arc::new(Mutex::new(to_client));
         let to_client_clone = to_client.clone();
-        clients.insert(client_id.clone(), Client{id: client_id.clone(), addr, comm: to_client_clone});
 
-        tokio::spawn(async move {
-            while let Some(Ok(ws_msg)) = from_client.next().await {
-                if let ws::Message::Close(_) = ws_msg {
-                    println!("Client connection closed");
-                    let mut clients = state.clients.lock().unwrap();
-                    if clients.remove(&client_id).is_none() {
-                        println!("[Should not happen] Client {client_id} disconnected, but was not in the clients map");
-                    }
-                    break;
-                }
+        let client = Client {
+            id: client_id.clone(),
+            addr,
+            comm: to_client_clone,
+        };
 
-                let ws::Message::Text(text) = ws_msg else {
-                    println!("[Should not happen] Unknown message from client: {ws_msg:?}");
-                    let mut to_client = to_client.lock().unwrap();
-                    _ = to_client.send(MessageFromServer::BadRequest.ws_msg());
-                    continue;
-                };
+        clients.insert(client_id.clone(), client.clone());
 
-                let Ok(msg_from_client) = serde_json::from_str::<MessageFromClient>(&text) else {
-                    println!("[Should not happen] Error parsing client message");
-                    let mut to_client = to_client.lock().unwrap();
-                    _ = to_client.send(MessageFromServer::BadRequest.ws_msg());
-                    continue;
-                };
+        let state = state.clone();
 
-                match msg_from_client {
-                    MessageFromClient::GetRooms => handle_get_rooms(),
-                    MessageFromClient::CreateRoom => handle_create_room(),
-                    MessageFromClient::JoinRoom { room_id } => handle_join_room(room_id),
-                }
-            }
-        });
+        _ = tokio::spawn(async move { ws_loop(client, from_client, to_client, state).await });
     })
 }
 
-fn handle_get_rooms() {}
+async fn ws_loop(
+    client: Client,
+    mut from_client: SplitStream<WebSocket>,
+    to_client: Arc<Mutex<SplitSink<WebSocket, ws::Message>>>,
+    state: State,
+) {
+    println!("Starting ws loop");
+    while let Some(Ok(ws_msg)) = from_client.next().await {
+        if let ws::Message::Close(_) = ws_msg {
+            println!("Client connection closed");
+            let mut clients = state.clients.lock().await;
+            if clients.remove(&client.id).is_none() {
+                println!(
+                    "[Should not happen] Client {} disconnected, but was not in the clients map",
+                    client.id
+                );
+            }
+            return;
+        }
 
-fn handle_create_room() {}
+        let ws::Message::Text(text) = ws_msg else {
+            println!("[Should not happen] Unknown message from client: {ws_msg:?}");
+            let mut to_client = to_client.lock().await;
+            _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+            continue;
+        };
 
-fn handle_join_room(room_id: u64) {}
+        let msg_from_client = match serde_json::from_str::<MessageFromClient>(&text) {
+            Ok(m) => m,
+            Err(err) => {
+                println!("[Should not happen] Error parsing client message `{text}`: {err}");
+                let mut to_client = to_client.lock().await;
+                _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+                continue;
+            }
+        };
 
-// (String, SocketAddr) -> u64
+        match msg_from_client {
+            MessageFromClient::GetRooms => handle_get_rooms().await,
+            MessageFromClient::CreateRoom => handle_create_room(&client, &state).await,
+            MessageFromClient::JoinRoom { room_id } => {
+                handle_join_room(room_id, &client, &state).await
+            }
+            MessageFromClient::DeleteRoom { room_id } => {
+                handle_delete_room(room_id, &client, &state).await
+            }
+            MessageFromClient::StartGame => handle_start_game().await,
+        }
+    }
+}
 
-// let room_id = (host_id, addr);
+async fn handle_get_rooms() {
+    todo!();
+}
 
-// if rooms.contains_key(&room_id) {
-//     println!("Client {host_id} already is hosting a room");
+async fn handle_create_room(client: &Client, state: &State) {
+    let mut to_client = client.comm.lock().await;
+    let mut rooms = state.rooms.lock().await;
 
-//     let msg = serde_json::to_string(&MessageFromServer::RoomAlreadyExists)
-//         .unwrap()
-//         .into();
-//     _ = to_client.send(ws::Message::Text(msg));
-// } else {
-//     println!("Creating new room with client {host_id} as the host");
+    let mut hasher = DefaultHasher::new();
+    client.id.hash(&mut hasher);
+    client.addr.hash(&mut hasher);
+    let room_id = hasher.finish();
 
-//     let msg = serde_json::to_string(&MessageFromServer::RoomCreated)
-//         .unwrap()
-//         .into();
-//     _ = to_client.send(ws::Message::Text(msg));
+    if rooms.contains_key(&room_id) {
+        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        return;
+    }
 
-//     let host = Client {
-//         id: host_id,
-//         addr,
-//         comm: to_client,
-//     };
-//     rooms.insert(
-//         room_id,
-//         Room {
-//             max_size: 4,
-//             host,
-//             guests: HashMap::new(),
-//         },
-//     );
-// }
+    rooms.insert(
+        room_id,
+        Room {
+            max_size: 4,
+            host_id: client.id.clone(),
+            guest_ids: HashSet::new(),
+        },
+    );
+
+    println!("Room {room_id} created by client {}", client.id);
+
+    _ = to_client
+        .send(MessageFromServer::RoomCreated.ws_msg())
+        .await;
+}
+
+async fn handle_join_room(room_id: u64, client: &Client, state: &State) {
+    let mut to_client = client.comm.lock().await;
+    let clients = state.clients.lock().await;
+    let mut rooms = state.rooms.lock().await;
+
+    let Some(room) = rooms.get_mut(&room_id) else {
+        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        return;
+    };
+
+    if room.host_id == client.id {
+        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        return;
+    }
+
+    let ws_msg = MessageFromServer::GuestJoined {
+        guest_id: client.id.clone(),
+    }
+    .ws_msg();
+
+    room.guest_ids.insert(client.id.clone());
+
+    let host = clients.get(&room.host_id).unwrap();
+    let mut to_host = host.comm.lock().await;
+    _ = to_host.send(ws_msg.clone()).await;
+
+    for guest_id in &room.guest_ids {
+        if guest_id == &client.id {
+            _ = to_client
+                .send(MessageFromServer::JoinedRoom { room: room.clone() }.ws_msg())
+                .await;
+            continue;
+        }
+
+        let guest = clients.get(guest_id).unwrap();
+        let mut to_guest = guest.comm.lock().await;
+        _ = to_guest.send(ws_msg.clone()).await;
+    }
+}
+
+async fn handle_delete_room(room_id: u64, client: &Client, state: &State) {
+    let mut to_client = client.comm.lock().await;
+    let mut rooms = state.rooms.lock().await;
+
+    let Some(room) = rooms.get_mut(&room_id) else {
+        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        return;
+    };
+
+    if room.host_id != client.id {
+        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        return;
+    }
+
+    rooms.remove(&room_id);
+    todo!("notify guests that the host deleted this room")
+}
+
+async fn handle_start_game() {
+    todo!()
+}

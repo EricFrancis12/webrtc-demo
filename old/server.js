@@ -39,7 +39,7 @@ wss.on("connection", (ws) => {
       console.log("Received:", data.type);
       
       switch (data.type) {
-        case "join-request":
+        case "join":
           handleJoin(ws);
           break;
         case "offer":
@@ -66,7 +66,7 @@ function handleJoin(ws) {
     waitingClient = ws;
     ws.peerId = null;
     console.log("First client waiting for peer...");
-    ws.send(JSON.stringify({ type: "waiting-for-partner" }));
+    ws.send(JSON.stringify({ type: "waiting" }));
   } else {
     // Second client - pair them up
     const peer1 = waitingClient;
@@ -82,8 +82,8 @@ function handleJoin(ws) {
     console.log("Two clients paired! Starting WebRTC handshake...");
     
     // Tell first client to initiate the offer
-    peer1.send(JSON.stringify({ type: "partners-ready", initiator: true }));
-    peer2.send(JSON.stringify({ type: "partners-ready", initiator: false }));
+    peer1.send(JSON.stringify({ type: "ready", initiator: true }));
+    peer2.send(JSON.stringify({ type: "ready", initiator: false }));
     
     // Close connections after clients establish P2P (give them 5 seconds for handshake)
     setTimeout(() => {
