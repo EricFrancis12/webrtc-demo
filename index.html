@@ -208,7 +208,8 @@
   <script>
     // WebSocket connection to signaling server
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    const client_id = new URLSearchParams(window.location.search).get("client_id") ?? "";
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws?client_id=${client_id}`);
     
     // WebRTC connection
     let peerConnection = null;
