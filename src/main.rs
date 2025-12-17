@@ -53,6 +53,7 @@ struct State {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum MessageFromClient {
+    StartGame,
     GetRooms,
     CreateRoom,
     JoinRoom {
@@ -61,7 +62,6 @@ enum MessageFromClient {
     DeleteRoom {
         room_id: u32,
     },
-    StartGame,
     Offer {
         to_client_id: String,
         from_client_id: String,
@@ -101,6 +101,7 @@ impl MessageFromServer {
 enum DisconnectReason {
     InvalidClientId,
     ClientIdTaken,
+    HostStartedGame,
 }
 
 const PORT: u16 = 3000;
@@ -234,6 +235,7 @@ async fn ws_loop(
         };
 
         match msg_from_client {
+            MessageFromClient::StartGame => handle_start_game(&client, &state).await,
             MessageFromClient::GetRooms => handle_get_rooms().await,
             MessageFromClient::CreateRoom => handle_create_room(&client, &state).await,
             MessageFromClient::JoinRoom { room_id } => {
@@ -242,7 +244,6 @@ async fn ws_loop(
             MessageFromClient::DeleteRoom { room_id } => {
                 handle_delete_room(room_id, &client, &state).await
             }
-            MessageFromClient::StartGame => handle_start_game().await,
             MessageFromClient::Offer { to_client_id, .. }
             | MessageFromClient::Answer { to_client_id, .. }
             | MessageFromClient::IceCandidate { to_client_id, .. } => {
@@ -250,6 +251,49 @@ async fn ws_loop(
             }
         }
     }
+}
+
+async fn handle_start_game(client: &Client, state: &State) {
+    let mut rooms = state.rooms.lock().await;
+
+    let room_id = client.host_room_id();
+    let Some(room) = rooms.get(&room_id) else {
+        let mut to_client = client.comm.lock().await;
+        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        return;
+    };
+
+    let mut clients = state.clients.lock().await;
+    for guest_id in &room.guest_ids {
+        {
+            let guest_client = clients.get(guest_id).unwrap();
+            let mut to_client = guest_client.comm.lock().await;
+            _ = to_client
+                .send(
+                    MessageFromServer::Disconnect {
+                        reason: DisconnectReason::HostStartedGame,
+                    }
+                    .ws_msg(),
+                )
+                .await;
+            _ = to_client.close();
+        }
+
+        clients.remove(guest_id);
+    }
+
+    let mut to_client = client.comm.lock().await;
+    _ = to_client
+        .send(
+            MessageFromServer::Disconnect {
+                reason: DisconnectReason::HostStartedGame,
+            }
+            .ws_msg(),
+        )
+        .await;
+    _ = to_client.close();
+
+    rooms.remove(&room_id);
 }
 
 async fn handle_get_rooms() {
@@ -339,10 +383,6 @@ async fn handle_delete_room(room_id: u32, client: &Client, state: &State) {
 
     rooms.remove(&room_id);
     todo!("notify guests that the host deleted this room")
-}
-
-async fn handle_start_game() {
-    todo!()
 }
 
 async fn forward_to_client(to_client_id: String, text: Utf8Bytes, state: &State) {

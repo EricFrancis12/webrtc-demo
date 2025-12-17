@@ -28,6 +28,12 @@
                 Send to Room
             </button>
         </div>
+
+        <div>
+            <button id="start-game-btn">
+                Start Game
+            </button>
+        </div>
     </div>
 
     <script>
@@ -114,6 +120,7 @@
         const joinRoomBtn = document.getElementById("join-room-btn");
         const sendToRoomInput = document.getElementById("send-to-room-input");
         const sendToRoomBtn = document.getElementById("send-to-room-btn");
+        const startGameBtn = document.getElementById("start-game-btn");
 
         createRoomBtn.addEventListener("click", () => {
             ws.send(JSON.stringify({ type: "CreateRoom" }));
@@ -134,6 +141,10 @@
                 console.log("Sending message to peer:", peer_id);
                 conn.dataChannel.send(sendToRoomInput.value);
             }
+        });
+
+        startGameBtn.addEventListener("click", () => {
+            ws.send(JSON.stringify({ type: "StartGame" }));
         });
 
         async function setupPeerConnection(peer_id) {
