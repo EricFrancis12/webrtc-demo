@@ -38,11 +38,16 @@
         const joinRoomBtn = document.getElementById("join-room-btn");
 
         createRoomBtn.addEventListener("click", () => {
-            ws.send(JSON.stringify("create-room"));
+            ws.send(JSON.stringify({ type: "CreateRoom" }));
         });
 
         joinRoomBtn.addEventListener("click", () => {
-            ws.send(`{ "join-room": { "room_id": ${roomIdInput.value} } }`);
+            try {
+                const room_id = Number.parseInt(roomIdInput.value);
+                ws.send(JSON.stringify({ type: "JoinRoom", room_id }));
+            } catch (_) {
+                console.error("Room ids must be numbers");
+            }
         });
     </script>
 

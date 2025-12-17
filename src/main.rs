@@ -49,7 +49,7 @@ struct State {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(tag = "type")]
 enum MessageFromClient {
     GetRooms,
     CreateRoom,
@@ -59,7 +59,7 @@ enum MessageFromClient {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(tag = "type")]
 enum MessageFromServer {
     Ok,
     BadRequest,
@@ -77,7 +77,6 @@ impl MessageFromServer {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 enum DisconnectReason {
     InvalidClientId,
     ClientIdTaken,
