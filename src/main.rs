@@ -36,8 +36,10 @@ impl Client {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Room {
-    max_size: usize,
-    // password: Option<String>, // TODO: ...
+    id: u32,
+    // TODO: ...
+    // max_size: usize,
+    // password: Option<String>,
     host_id: String,
     guest_ids: HashSet<String>,
 }
@@ -53,9 +55,28 @@ struct State {
 enum MessageFromClient {
     GetRooms,
     CreateRoom,
-    JoinRoom { room_id: u32 },
-    DeleteRoom { room_id: u32 },
+    JoinRoom {
+        room_id: u32,
+    },
+    DeleteRoom {
+        room_id: u32,
+    },
     StartGame,
+    Offer {
+        to_client_id: String,
+        from_client_id: String,
+        offer: serde_json::Value,
+    },
+    Answer {
+        to_client_id: String,
+        from_client_id: String,
+        answer: serde_json::Value,
+    },
+    IceCandidate {
+        to_client_id: String,
+        from_client_id: String,
+        candidate: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,7 +84,7 @@ enum MessageFromClient {
 enum MessageFromServer {
     Ok,
     BadRequest,
-    Disconnect(DisconnectReason),
+    Disconnect { reason: DisconnectReason },
     RoomCreated { room_id: u32 },
     GuestJoined { guest_id: String },
     JoinedRoom { room: Room },
@@ -132,7 +153,12 @@ async fn handle_ws(
         if client_id.is_empty() {
             println!("Invalid client_id: {client_id}");
             _ = to_client
-                .send(MessageFromServer::Disconnect(DisconnectReason::InvalidClientId).ws_msg())
+                .send(
+                    MessageFromServer::Disconnect {
+                        reason: DisconnectReason::InvalidClientId,
+                    }
+                    .ws_msg(),
+                )
                 .await;
             _ = to_client.close();
             return;
@@ -142,7 +168,12 @@ async fn handle_ws(
         if clients.contains_key(&client_id) {
             println!("This client_id {client_id} is already taken");
             _ = to_client
-                .send(MessageFromServer::Disconnect(DisconnectReason::ClientIdTaken).ws_msg())
+                .send(
+                    MessageFromServer::Disconnect {
+                        reason: DisconnectReason::ClientIdTaken,
+                    }
+                    .ws_msg(),
+                )
                 .await;
             _ = to_client.close();
             return;
@@ -212,6 +243,11 @@ async fn ws_loop(
                 handle_delete_room(room_id, &client, &state).await
             }
             MessageFromClient::StartGame => handle_start_game().await,
+            MessageFromClient::Offer { to_client_id, .. }
+            | MessageFromClient::Answer { to_client_id, .. }
+            | MessageFromClient::IceCandidate { to_client_id, .. } => {
+                forward_to_client(to_client_id, text.clone(), &state).await
+            }
         }
     }
 }
@@ -234,7 +270,7 @@ async fn handle_create_room(client: &Client, state: &State) {
     rooms.insert(
         room_id,
         Room {
-            max_size: 4,
+            id: room_id,
             host_id: client.id.clone(),
             guest_ids: HashSet::new(),
         },
@@ -307,4 +343,11 @@ async fn handle_delete_room(room_id: u32, client: &Client, state: &State) {
 
 async fn handle_start_game() {
     todo!()
+}
+
+async fn forward_to_client(to_client_id: String, text: Utf8Bytes, state: &State) {
+    let clients = state.clients.lock().await;
+    let client = clients.get(&to_client_id).unwrap();
+    let mut to_client = client.comm.lock().await;
+    _ = to_client.send(ws::Message::Text(text)).await;
 }

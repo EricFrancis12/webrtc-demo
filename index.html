@@ -8,26 +8,102 @@
 </head>
 
 <body>
-    <button id="create-room-btn">
-        Create Room
-    </button>
+    <div style="display: flex; flex-direction: column; row-gap: 10px;">
+        <div>
+            <button id="create-room-btn">
+                Create Room
+            </button>
+        </div>
 
-    <input id="room-id-input" />
-    <button id="join-room-btn">
-        Join Room
-    </button>
+        <div>
+            <input id="room-id-input" />
+            <button id="join-room-btn">
+                Join Room
+            </button>
+        </div>
+
+        <div>
+            <input id="send-to-room-input" />
+            <button id="send-to-room-btn">
+                Send to Room
+            </button>
+        </div>
+    </div>
 
     <script>
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const client_id = new URLSearchParams(window.location.search).get("client_id") ?? "";
         const ws = new WebSocket(`${protocol}//localhost:3000/ws?client_id=${client_id}`);
 
+        let room;
+        let conns = {};
+
         ws.onopen = () => {
             console.log("Connected to ws server");
         };
 
-        ws.onmessage = (e) => {
+        ws.onmessage = async (e) => {
             console.log("Server response:", e.data);
+            const msg = JSON.parse(e.data);
+
+            switch (msg.type) {
+                // Messages from server
+                case "Ok": break;
+                case "BadRequest": break;
+                case "Disconnect": break;
+                case "RoomCreated": {
+                    room = {
+                        id: msg.room_id,
+                        host_id: client_id,
+                        guest_ids: [],
+                    };
+                }; break;
+                case "GuestJoined": {
+                    room.guest_ids.push(msg.guest_id);
+                    const peer = await setupPeerConnection(msg.guest_id);
+
+                    const dataChannel = peer.peerConnection.createDataChannel("chat");
+                    setupDataChannel(dataChannel);
+                    peer.dataChannel = dataChannel;
+
+                    // Create and send offer
+                    const offer = await peer.peerConnection.createOffer();
+                    await peer.peerConnection.setLocalDescription(offer);
+                    ws.send(JSON.stringify({
+                        type: "Offer",
+                        to_client_id: msg.guest_id,
+                        from_client_id: client_id,
+                        offer: offer
+                    }));
+                }; break;
+                case "JoinedRoom": {
+                    room = msg.room;
+
+                    const peer = await setupPeerConnection(msg.room.host_id);
+                    peer.peerConnection.ondatachannel = (e) => {
+                        console.log("Data channel event:", e);
+                        peer.dataChannel = e.channel;
+                        setupDataChannel(peer.dataChannel);
+                    };
+                }; break;
+
+                // Messages from other clients forwarded thru server
+                case "Offer": {
+                    console.log("Offer received!", msg);
+                    await handleOffer(msg);
+                }; break;
+                case "Answer": {
+                    console.log("Answer received!", msg);
+                    await handleAnswer(msg);
+                }; break;
+                case "IceCandidate": {
+                    console.log("IceCandidate received!", msg);
+                    await handleIceCandidate(msg);
+                }; break;
+
+                // Unknown messages
+                default: console.log("[Should not happen] Unknown MessageFromServer type:", msg.type); break;
+            }
         };
 
         ws.onerror = (err) => console.error("WebSocket error:", err);
@@ -36,6 +112,8 @@
         const createRoomBtn = document.getElementById("create-room-btn");
         const roomIdInput = document.getElementById("room-id-input");
         const joinRoomBtn = document.getElementById("join-room-btn");
+        const sendToRoomInput = document.getElementById("send-to-room-input");
+        const sendToRoomBtn = document.getElementById("send-to-room-btn");
 
         createRoomBtn.addEventListener("click", () => {
             ws.send(JSON.stringify({ type: "CreateRoom" }));
@@ -49,6 +127,99 @@
                 console.error("Room ids must be numbers");
             }
         });
+
+        sendToRoomBtn.addEventListener("click", () => {
+            console.log("Clicked");
+            for (const [peer_id, conn] of Object.entries(conns)) {
+                console.log("Sending message to peer:", peer_id);
+                conn.dataChannel.send(sendToRoomInput.value);
+            }
+        });
+
+        async function setupPeerConnection(peer_id) {
+            const config = {
+                iceServers: [
+                    { urls: "stun:stun.l.google.com:19302" },
+                    { urls: "stun:stun1.l.google.com:19302" }
+                ]
+            };
+
+            const peerConnection = new RTCPeerConnection(config);
+
+            peerConnection.onconnectionstatechange = () => {
+                console.log("Connection state:", peerConnection.connectionState);
+            };
+
+            peerConnection.onicecandidate = (e) => {
+                // console.log("ice candidate event:", e);
+                if (e.candidate) {
+                    ws.send(JSON.stringify({
+                        type: "IceCandidate",
+                        to_client_id: peer_id,
+                        from_client_id: client_id,
+                        candidate: e.candidate
+                    }));
+                }
+            };
+
+            const peer = { peerConnection };
+            conns[peer_id] = peer;
+
+            return peer;
+        }
+
+        function setupDataChannel(dataChannel) {
+            dataChannel.onopen = () => {
+                console.log("Data channel opened");
+            };
+
+            dataChannel.onclose = () => {
+                console.log("Data channel closed");
+            };
+
+            dataChannel.onmessage = (e) => {
+                console.log("Data channel message received:", e);
+            };
+
+            dataChannel.onerror = (err) => {
+                console.error("Data channel error:", err);
+            };
+        }
+
+        async function handleOffer(msg) {
+            const peer = await setupPeerConnection(msg.from_client_id);
+
+            // Guest needs to listen for the data channel created by the host
+            peer.peerConnection.ondatachannel = (e) => {
+                console.log("Data channel received from host:", e);
+                peer.dataChannel = e.channel;
+                setupDataChannel(peer.dataChannel);
+            };
+
+            await peer.peerConnection.setRemoteDescription(new RTCSessionDescription(msg.offer));
+            const answer = await peer.peerConnection.createAnswer();
+            await peer.peerConnection.setLocalDescription(answer);
+            ws.send(JSON.stringify({
+                type: "Answer",
+                to_client_id: msg.from_client_id,
+                from_client_id: client_id,
+                answer: answer
+            }));
+        }
+
+        async function handleAnswer(msg) {
+            const { peerConnection } = conns[msg.from_client_id];
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.answer));
+        }
+
+        async function handleIceCandidate(msg) {
+            const { peerConnection } = conns[msg.from_client_id];
+            try {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            } catch (err) {
+                console.error("Error adding ICE candidate:", err);
+            }
+        }
     </script>
 
 </body>
