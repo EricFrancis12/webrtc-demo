@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    hash::{DefaultHasher, Hash, Hasher},
     net::SocketAddr,
     sync::Arc,
 };
@@ -18,6 +17,7 @@ use futures::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
+use fxhash::hash32;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -26,6 +26,12 @@ struct Client {
     id: String,
     addr: SocketAddr,
     comm: Arc<Mutex<SplitSink<WebSocket, ws::Message>>>,
+}
+
+impl Client {
+    fn host_room_id(&self) -> u32 {
+        hash32(&(self.id.clone(), self.addr))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +45,7 @@ struct Room {
 #[derive(Clone)]
 struct State {
     clients: Arc<Mutex<HashMap<String, Client>>>,
-    rooms: Arc<Mutex<HashMap<u64, Room>>>,
+    rooms: Arc<Mutex<HashMap<u32, Room>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,8 +53,8 @@ struct State {
 enum MessageFromClient {
     GetRooms,
     CreateRoom,
-    JoinRoom { room_id: u64 },
-    DeleteRoom { room_id: u64 },
+    JoinRoom { room_id: u32 },
+    DeleteRoom { room_id: u32 },
     StartGame,
 }
 
@@ -56,9 +62,9 @@ enum MessageFromClient {
 #[serde(rename_all = "kebab-case")]
 enum MessageFromServer {
     Ok,
-    RoomCreated,
     BadRequest,
     Disconnect(DisconnectReason),
+    RoomCreated { room_id: u32 },
     GuestJoined { guest_id: String },
     JoinedRoom { room: Room },
 }
@@ -219,10 +225,7 @@ async fn handle_create_room(client: &Client, state: &State) {
     let mut to_client = client.comm.lock().await;
     let mut rooms = state.rooms.lock().await;
 
-    let mut hasher = DefaultHasher::new();
-    client.id.hash(&mut hasher);
-    client.addr.hash(&mut hasher);
-    let room_id = hasher.finish();
+    let room_id = client.host_room_id();
 
     if rooms.contains_key(&room_id) {
         _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
@@ -241,11 +244,11 @@ async fn handle_create_room(client: &Client, state: &State) {
     println!("Room {room_id} created by client {}", client.id);
 
     _ = to_client
-        .send(MessageFromServer::RoomCreated.ws_msg())
+        .send(MessageFromServer::RoomCreated { room_id }.ws_msg())
         .await;
 }
 
-async fn handle_join_room(room_id: u64, client: &Client, state: &State) {
+async fn handle_join_room(room_id: u32, client: &Client, state: &State) {
     let mut to_client = client.comm.lock().await;
     let clients = state.clients.lock().await;
     let mut rooms = state.rooms.lock().await;
@@ -285,7 +288,7 @@ async fn handle_join_room(room_id: u64, client: &Client, state: &State) {
     }
 }
 
-async fn handle_delete_room(room_id: u64, client: &Client, state: &State) {
+async fn handle_delete_room(room_id: u32, client: &Client, state: &State) {
     let mut to_client = client.comm.lock().await;
     let mut rooms = state.rooms.lock().await;
 
