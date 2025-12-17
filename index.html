@@ -39,7 +39,7 @@
     <script>
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const client_id = new URLSearchParams(window.location.search).get("client_id") ?? "";
-        const ws = new WebSocket(`${protocol}//localhost:3000/ws?client_id=${client_id}`);
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws?client_id=${client_id}`);
 
         let room;
         let conns = {};

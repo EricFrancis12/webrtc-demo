@@ -180,29 +180,21 @@ async fn handle_ws(
             return;
         }
 
-        let to_client = Arc::new(Mutex::new(to_client));
-        let to_client_clone = to_client.clone();
-
         let client = Client {
             id: client_id.clone(),
             addr,
-            comm: to_client_clone,
+            comm: Arc::new(Mutex::new(to_client)),
         };
 
         clients.insert(client_id.clone(), client.clone());
 
         let state = state.clone();
 
-        _ = tokio::spawn(async move { ws_loop(client, from_client, to_client, state).await });
+        _ = tokio::spawn(async move { ws_loop(client, from_client, state).await });
     })
 }
 
-async fn ws_loop(
-    client: Client,
-    mut from_client: SplitStream<WebSocket>,
-    to_client: Arc<Mutex<SplitSink<WebSocket, ws::Message>>>,
-    state: State,
-) {
+async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state: State) {
     println!("Starting ws loop");
     while let Some(Ok(ws_msg)) = from_client.next().await {
         if let ws::Message::Close(_) = ws_msg {
@@ -219,7 +211,7 @@ async fn ws_loop(
 
         let ws::Message::Text(text) = ws_msg else {
             println!("[Should not happen] Unknown message from client: {ws_msg:?}");
-            let mut to_client = to_client.lock().await;
+            let mut to_client = client.comm.lock().await;
             _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
             continue;
         };
@@ -228,7 +220,7 @@ async fn ws_loop(
             Ok(m) => m,
             Err(err) => {
                 println!("[Should not happen] Error parsing client message `{text}`: {err}");
-                let mut to_client = to_client.lock().await;
+                let mut to_client = client.comm.lock().await;
                 _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
                 continue;
             }
