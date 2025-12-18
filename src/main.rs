@@ -100,6 +100,7 @@ impl TryFrom<&ws::Message> for MessageFromClient {
 enum MessageFromServer {
     Ok,
     BadRequest,
+    ClientNotFound,
     Disconnect { reason: DisconnectReason },
     RoomCreated { room_id: u32 },
     GuestJoined { guest_id: String },
@@ -108,7 +109,9 @@ enum MessageFromServer {
 
 impl MessageFromServer {
     fn ws_msg(&self) -> ws::Message {
-        let text: Utf8Bytes = serde_json::to_string(self).unwrap().into();
+        let text: Utf8Bytes = serde_json::to_string(self)
+            .expect("MessageFromServer should serialize")
+            .into();
         ws::Message::Text(text)
     }
 }
@@ -137,13 +140,16 @@ async fn main() {
 
     println!("Server running on port {PORT}");
     let addr = format!("0.0.0.0:{PORT}");
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("Can bind to port");
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
-    .unwrap();
+    .expect("Can listen and serve");
 }
 
 async fn handle_serve_html() -> Html<&'static str> {
@@ -213,14 +219,7 @@ async fn handle_ws(
 async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state: State) {
     while let Some(Ok(ws_msg)) = from_client.next().await {
         if let ws::Message::Close(_) = ws_msg {
-            println!("Client connection closed");
-            let mut clients = state.clients.lock().await;
-            if clients.remove(&client.id).is_none() {
-                println!(
-                    "[Should not happen] Client {} disconnected, but was not in the clients map",
-                    client.id
-                );
-            }
+            handle_connection_closed(&client, &state).await;
             return;
         }
 
@@ -244,9 +243,19 @@ async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state:
             MessageFromClient::Offer { to_client_id, .. }
             | MessageFromClient::Answer { to_client_id, .. }
             | MessageFromClient::IceCandidate { to_client_id, .. } => {
-                forward_to_client(to_client_id, ws_msg, &state).await
+                forward_to_client(to_client_id, ws_msg, &client, &state).await
             }
         }
+    }
+}
+
+async fn handle_connection_closed(client: &Client, state: &State) {
+    let mut clients = state.clients.lock().await;
+    if clients.remove(&client.id).is_none() {
+        println!(
+            "[Should not happen] Client {} disconnected, but was not in the clients map",
+            client.id
+        );
     }
 }
 
@@ -262,8 +271,7 @@ async fn handle_start_game(client: &Client, state: &State) {
 
     let mut clients = state.clients.lock().await;
     for guest_id in &room.guest_ids {
-        {
-            let guest_client = clients.get(guest_id).unwrap();
+        if let Some(guest_client) = clients.get(guest_id) {
             let mut to_client = guest_client.comm.lock().await;
             _ = to_client
                 .send(
@@ -274,6 +282,10 @@ async fn handle_start_game(client: &Client, state: &State) {
                 )
                 .await;
             _ = to_client.close();
+        } else {
+            println!(
+                "[Should not happen] Guest id {guest_id} is present in room {room_id}, but is not in clients"
+            );
         }
 
         clients.remove(guest_id);
@@ -345,7 +357,15 @@ async fn handle_join_room(room_id: u32, client: &Client, state: &State) {
 
     room.guest_ids.insert(client.id.clone());
 
-    let host = clients.get(&room.host_id).unwrap();
+    let Some(host) = clients.get(&room.host_id) else {
+        println!(
+            "[Should not happen] Correcting illegal state: room {room_id} exists with host {} not in clients",
+            room.host_id
+        );
+        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        return;
+    };
+
     let mut to_host = host.comm.lock().await;
     _ = to_host.send(ws_msg.clone()).await;
 
@@ -381,9 +401,18 @@ async fn handle_delete_room(room_id: u32, client: &Client, state: &State) {
     todo!("notify guests that the host deleted this room")
 }
 
-async fn forward_to_client(to_client_id: String, ws_msg: ws::Message, state: &State) {
+async fn forward_to_client(
+    to_client_id: String,
+    ws_msg: ws::Message,
+    client: &Client,
+    state: &State,
+) {
     let clients = state.clients.lock().await;
-    let client = clients.get(&to_client_id).unwrap();
-    let mut to_client = client.comm.lock().await;
+    let Some(target_client) = clients.get(&to_client_id) else {
+        let mut comm = client.comm.lock().await;
+        _ = comm.send(MessageFromServer::ClientNotFound.ws_msg()).await;
+        return;
+    };
+    let mut to_client = target_client.comm.lock().await;
     _ = to_client.send(ws_msg).await;
 }
