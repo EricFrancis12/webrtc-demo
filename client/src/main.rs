@@ -1,17 +1,26 @@
 use std::io::{self, Write};
 
-use futures::StreamExt;
-use tokio_tungstenite::connect_async;
+use futures::{SinkExt, StreamExt};
+use rand;
+use tokio_tungstenite::{connect_async, tungstenite as ws};
+
+use server::{MessageFromClient, MessageFromServer};
 
 #[tokio::main]
 async fn main() {
-    let client_id = "5678";
+    let client_id: u32 = rand::random();
     let url = format!("ws://localhost:3000/ws?client_id={}", client_id);
 
     println!("Connecting to ws server at {url}");
 
     let (ws_stream, _) = connect_async(url).await.unwrap();
-    let (write, read) = ws_stream.split();
+    let (mut server_tx, mut server_rx) = ws_stream.split();
+
+    // _ = tokio::spawn(async move {
+    //     while let Some(Ok(ws_msg)) = server_rx.next().await {
+    //         println!("Message from server: {ws_msg:?}");
+    //     }
+    // });
 
     println!("Connected to ws server");
 
@@ -42,19 +51,33 @@ async fn main() {
         match input {
             "list" | "1" => {
                 println!("Listing rooms...");
-                // TODO: Send GetRooms message to server
+                let text = serde_json::to_string(&MessageFromClient::GetRooms)
+                    .unwrap()
+                    .into();
+                _ = server_tx.send(ws::Message::Text(text)).await;
             }
             "create" | "2" => {
                 println!("Creating room...");
-                // TODO: Send CreateRoom message to server
+                let text = serde_json::to_string(&MessageFromClient::CreateRoom)
+                    .unwrap()
+                    .into();
+                _ = server_tx.send(ws::Message::Text(text)).await;
             }
             "join" | "3" => {
                 print!("Enter room ID: ");
                 io::stdout().flush().unwrap();
                 let mut room_id = String::new();
                 io::stdin().read_line(&mut room_id).unwrap();
-                println!("Joining room {}...", room_id.trim());
-                // TODO: Send JoinRoom message to server
+                room_id = room_id.trim().to_owned();
+                println!("Joining room {}...", room_id);
+                let Ok(room_id) = room_id.parse::<u32>() else {
+                    println!("Room id must be a number");
+                    continue;
+                };
+                let text = serde_json::to_string(&MessageFromClient::JoinRoom { room_id })
+                    .unwrap()
+                    .into();
+                _ = server_tx.send(ws::Message::Text(text)).await;
             }
             "send" | "4" => {
                 print!("Enter message: ");
@@ -75,6 +98,21 @@ async fn main() {
             _ => {
                 println!("Unknown command: {}", input);
                 println!("Type 'list', 'create', 'join', 'send', 'start', or 'exit'");
+                continue;
+            }
+        }
+
+        // Blocking receive
+        let mut received = false;
+        while !received {
+            if let Some(Ok(ws_msg)) = server_rx.next().await {
+                let ws::Message::Text(text) = ws_msg else {
+                    panic!("Non-text ws message");
+                };
+                let msg_from_server: MessageFromServer = serde_json::from_str(&text).unwrap();
+
+                println!("Message from server: {msg_from_server:?}");
+                received = true;
             }
         }
     }
