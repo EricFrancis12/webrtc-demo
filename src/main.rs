@@ -20,6 +20,7 @@ use futures::{
 use fxhash::hash32;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tracing::{error, info, warn};
 
 type ClientTx = SplitSink<WebSocket, ws::Message>;
 type ClientRx = SplitStream<WebSocket>;
@@ -43,7 +44,7 @@ impl Client {
     async fn send(&mut self, ws_msg: impl Into<ws::Message>) {
         let mut comm = self.comm.lock().await;
         if let Err(err) = comm.send(ws_msg.into()).await {
-            println!("Error sending to client {}: {err}", self.id);
+            error!("Error sending to client {}: {err}", self.id);
         }
     }
 
@@ -53,11 +54,15 @@ impl Client {
             .send(MessageFromServer::Disconnect { reason }.into())
             .await
         {
-            println!("Error sending to client {}: {err}", self.id);
+            error!("Error sending to client {}: {err}", self.id);
         }
         if let Err(err) = comm.close().await {
-            println!("Error closing connection for client {}: {err}", self.id);
+            error!("Error closing connection for client {}: {err}", self.id);
         }
+    }
+
+    async fn ok(&mut self) {
+        self.send(MessageFromServer::Ok).await
     }
 
     async fn bad_request(&mut self) {
@@ -83,6 +88,10 @@ impl Client {
         self.send(MessageFromServer::JoinedRoom { room }).await
     }
 
+    async fn host_deleted_room(&mut self) {
+        self.send(MessageFromServer::HostDeletedRoom).await
+    }
+
     fn host_room_id(&self) -> u32 {
         hash32(&(&self.id, self.addr))
     }
@@ -90,6 +99,7 @@ impl Client {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Room {
+    id: u32,
     // TODO: ...
     // max_size: usize,
     // password: Option<String>,
@@ -168,6 +178,7 @@ enum MessageFromServer {
     RoomCreated { room_id: u32 },
     GuestJoined { guest_id: String },
     JoinedRoom { room: Room },
+    HostDeletedRoom,
 }
 
 impl From<MessageFromServer> for ws::Message {
@@ -198,7 +209,7 @@ async fn main() {
         .route("/ws", get(handle_ws))
         .with_state(state);
 
-    println!("Server running on port {PORT}");
+    info!("Server running on port {PORT}");
     let addr = format!("0.0.0.0:{PORT}");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -229,7 +240,7 @@ async fn handle_ws(
 ) -> impl IntoResponse {
     ws.on_upgrade(async move |socket| {
         let client_id = query.client_id;
-        println!("New ws connection from client_id {client_id}");
+        info!("New ws connection from client_id {client_id}");
 
         let (client_tx, client_rx) = socket.split();
         let mut client = Client::new(&client_id, addr, client_tx);
@@ -267,7 +278,7 @@ async fn ws_loop(mut client: Client, mut client_rx: ClientRx, state: State) {
         }
 
         let Ok(msg_from_client) = MessageFromClient::try_from(&ws_msg) else {
-            println!("[Should not happen] Unknown message from client: {ws_msg:?}");
+            warn!("Unknown message from client: {ws_msg:?}");
             client.bad_request().await;
             continue;
         };
@@ -291,8 +302,8 @@ async fn ws_loop(mut client: Client, mut client_rx: ClientRx, state: State) {
 async fn handle_connection_closed(client: &Client, state: &State) {
     let mut clients = state.clients.lock().await;
     if clients.remove(&client.id).is_none() {
-        println!(
-            "[Should not happen] Client {} disconnected, but was not in the clients map",
+        warn!(
+            "Client {} disconnected, but was not in the clients map",
             client.id
         );
     }
@@ -316,9 +327,7 @@ async fn handle_start_game(client: &mut Client, state: &State) {
                 .disconnect(DisconnectReason::HostStartedGame)
                 .await;
         } else {
-            println!(
-                "[Should not happen] Guest id {guest_id} is present in room {room_id}, but is not in clients"
-            );
+            warn!("Guest id {guest_id} is present in room {room_id}, but is not in clients");
         }
     }
 
@@ -341,12 +350,13 @@ async fn handle_create_room(client: &mut Client, state: &State) {
     rooms.insert(
         room_id,
         Room {
+            id: room_id,
             host_id: client.id.clone(),
             guest_ids: HashSet::new(),
         },
     );
 
-    println!("Room {room_id} created by client {}", client.id);
+    info!("Room {room_id} created by client {}", client.id);
 
     client.room_created(room_id).await;
 }
@@ -365,8 +375,8 @@ async fn handle_join_room(room_id: u32, client: &mut Client, state: &State) {
     }
 
     let Some(host) = clients.get_mut(&room.host_id) else {
-        println!(
-            "[Should not happen] Correcting illegal state: room {room_id} exists with host {} not in clients",
+        warn!(
+            "Correcting illegal state: room {room_id} exists with host {} not in clients",
             room.host_id
         );
         client.bad_request().await;
@@ -380,13 +390,20 @@ async fn handle_join_room(room_id: u32, client: &mut Client, state: &State) {
 
     for guest_id in &room.guest_ids {
         if guest_id != &client.id {
-            let guest = clients.get_mut(guest_id).unwrap();
-            guest.guest_joined(client.id.clone()).await;
+            if let Some(guest) = clients.get_mut(guest_id) {
+                guest.guest_joined(client.id.clone()).await;
+            } else {
+                warn!(
+                    "Room {} contains guest id {guest_id}, but there is no client for them",
+                    room.id
+                );
+            };
         }
     }
 }
 
 async fn handle_delete_room(room_id: u32, client: &mut Client, state: &State) {
+    let mut clients = state.clients.lock().await;
     let mut rooms = state.rooms.lock().await;
 
     let Some(room) = rooms.get_mut(&room_id) else {
@@ -399,8 +416,19 @@ async fn handle_delete_room(room_id: u32, client: &mut Client, state: &State) {
         return;
     }
 
+    let guest_ids_to_inform = room.guest_ids.clone();
+
     rooms.remove(&room_id);
-    todo!("notify guests that the host deleted this room")
+
+    for guest_id in guest_ids_to_inform {
+        if let Some(guest) = clients.get_mut(&guest_id) {
+            guest.host_deleted_room().await;
+        } else {
+            warn!("Room {room_id} contains guest id {guest_id}, but there is no client for them");
+        };
+    }
+
+    client.ok().await;
 }
 
 async fn forward_to_client(
