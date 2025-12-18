@@ -173,30 +173,9 @@ async fn handle_ws(
 
         let (mut to_client, from_client) = socket.split();
 
-        if client_id.is_empty() {
-            println!("Invalid client_id: {client_id}");
+        if let Some(reason) = should_disconnect(&client_id, &state).await {
             _ = to_client
-                .send(
-                    MessageFromServer::Disconnect {
-                        reason: DisconnectReason::InvalidClientId,
-                    }
-                    .ws_msg(),
-                )
-                .await;
-            _ = to_client.close();
-            return;
-        }
-
-        let mut clients = state.clients.lock().await;
-        if clients.contains_key(&client_id) {
-            println!("This client_id {client_id} is already taken");
-            _ = to_client
-                .send(
-                    MessageFromServer::Disconnect {
-                        reason: DisconnectReason::ClientIdTaken,
-                    }
-                    .ws_msg(),
-                )
+                .send(MessageFromServer::Disconnect { reason }.ws_msg())
                 .await;
             _ = to_client.close();
             return;
@@ -208,12 +187,24 @@ async fn handle_ws(
             comm: Arc::new(Mutex::new(to_client)),
         };
 
+        let mut clients = state.clients.lock().await;
         clients.insert(client_id.clone(), client.clone());
 
         let state = state.clone();
 
         _ = tokio::spawn(async move { ws_loop(client, from_client, state).await });
     })
+}
+
+async fn should_disconnect(client_id: &str, state: &State) -> Option<DisconnectReason> {
+    if client_id.is_empty() {
+        return Some(DisconnectReason::InvalidClientId);
+    }
+    let clients = state.clients.lock().await;
+    if clients.contains_key(client_id) {
+        return Some(DisconnectReason::ClientIdTaken);
+    }
+    None
 }
 
 async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state: State) {
