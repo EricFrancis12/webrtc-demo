@@ -1,18 +1,13 @@
 use std::{
     collections::HashMap,
     io::{self, Write},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
 };
 
 use futures::{SinkExt, StreamExt, stream::SplitSink};
 use rand;
 use tokio::{net::TcpStream, sync::Mutex};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite as ws};
-
-use server::{MessageFromClient, MessageFromServer};
 use webrtc::{
     api::APIBuilder,
     data_channel::RTCDataChannel,
@@ -22,6 +17,8 @@ use webrtc::{
         sdp::session_description::RTCSessionDescription,
     },
 };
+
+use server::{MessageFromClient, MessageFromServer};
 
 struct Peer {
     rpc_conn: RTCPeerConnection,
@@ -44,9 +41,6 @@ async fn main() {
     let conns: Arc<Mutex<HashMap<String, Peer>>> = Arc::new(Mutex::new(HashMap::new()));
     let conns_clone = conns.clone();
 
-    let done = Arc::new(AtomicBool::new(false));
-    let done_clone = done.clone();
-
     _ = tokio::spawn(async move {
         let server_tx = server_tx_clone.clone();
         let conns = conns_clone.clone();
@@ -64,7 +58,6 @@ async fn main() {
                     M::Ok | M::BadRequest | M::ClientNotFound => { /* Do  nothing */ }
                     M::Disconnect { reason } => {
                         println!("Disconnected from server. reason: {reason:?}");
-                        done_clone.store(true, Ordering::Relaxed);
                         break;
                     }
                     M::Rooms { rooms } => println!("Rooms: {rooms:?}"),
@@ -190,7 +183,7 @@ async fn main() {
     println!("  6. exit - Exit application");
     println!();
 
-    while !done.load(Ordering::Relaxed) {
+    loop {
         print!("> ");
         io::stdout().flush().unwrap();
 
@@ -258,7 +251,11 @@ async fn main() {
             }
             "start" | "5" => {
                 println!("Starting game & disconnecting from server...");
-                // TODO: ...
+                let text = serde_json::to_string(&MessageFromClient::StartGame)
+                    .unwrap()
+                    .into();
+                let mut server_tx = server_tx.lock().await;
+                _ = server_tx.send(ws::Message::Text(text)).await;
             }
             "exit" | "quit" | "6" => {
                 println!("Goodbye!");
