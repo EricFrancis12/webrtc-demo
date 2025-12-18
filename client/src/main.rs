@@ -7,17 +7,20 @@ use std::{
     },
 };
 
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, stream::SplitSink};
 use rand;
-use tokio::sync::Mutex;
-use tokio_tungstenite::{connect_async, tungstenite as ws};
+use tokio::{net::TcpStream, sync::Mutex};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite as ws};
 
 use server::{MessageFromClient, MessageFromServer};
 use webrtc::{
     api::APIBuilder,
     data_channel::RTCDataChannel,
     ice_transport::ice_server::RTCIceServer,
-    peer_connection::{RTCPeerConnection, configuration::RTCConfiguration},
+    peer_connection::{
+        RTCPeerConnection, configuration::RTCConfiguration,
+        sdp::session_description::RTCSessionDescription,
+    },
 };
 
 struct Peer {
@@ -125,15 +128,25 @@ async fn main() {
                 use MessageFromClient as M;
                 match msg_from_peer {
                     M::Offer {
-                        to_client_id,
                         from_client_id,
                         offer,
-                    } => println!("Offer received from {from_client_id}: {offer:?}"),
+                        ..
+                    } => {
+                        println!("Offer received from {from_client_id}: {offer:?}");
+                        handle_offer(
+                            client_id.clone(),
+                            from_client_id,
+                            offer,
+                            server_tx.clone(),
+                            conns.clone(),
+                        )
+                        .await;
+                    }
                     M::Answer {
-                        to_client_id,
                         from_client_id,
                         answer,
-                    } => todo!(),
+                        ..
+                    } => println!("TODO: Answer received from {from_client_id}: {answer:?}"),
                     M::IceCandidate {
                         to_client_id,
                         from_client_id,
@@ -289,8 +302,6 @@ async fn setup_peer_connection(peer_id: impl Into<String>) -> Peer {
                 //             from_client_id: client_id,
                 //             candidate: e.candidate
                 //         }));
-            } else {
-                println!("[Should not happen] None Received from ICE Candidate event");
             }
         })
     }));
@@ -325,4 +336,52 @@ fn setup_data_channel(data_channel: &Arc<RTCDataChannel>) {
             println!("Data channel error: {err:?}");
         })
     }));
+}
+
+async fn handle_offer(
+    client_id: String,
+    from_peer_id: String,
+    offer: RTCSessionDescription,
+    server_tx: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, ws::Message>>>,
+    conns: Arc<Mutex<HashMap<String, Peer>>>,
+) {
+    let peer = setup_peer_connection(&from_peer_id).await;
+
+    let peer_id_clone = from_peer_id.clone();
+    let conns_clone = conns.clone();
+
+    // Guest needs to listen for the data channel created by the host
+    peer.rpc_conn.on_data_channel(Box::new(move |data_channel| {
+        let peer_id = peer_id_clone.clone();
+        let conns = conns_clone.clone();
+        Box::pin(async move {
+            println!("Data channel received from host");
+
+            let mut conns = conns.lock().await;
+            let peer = conns.get_mut(&peer_id).unwrap();
+
+            setup_data_channel(&data_channel);
+            peer.data_channel = Some(data_channel);
+        })
+    }));
+
+    peer.rpc_conn.set_remote_description(offer).await.unwrap();
+    let answer = peer.rpc_conn.create_answer(None).await.unwrap();
+    peer.rpc_conn
+        .set_local_description(answer.clone())
+        .await
+        .unwrap();
+
+    let mut conns = conns.lock().await;
+    conns.insert(from_peer_id.clone(), peer);
+
+    let msg_from_client = MessageFromClient::Answer {
+        to_client_id: from_peer_id,
+        from_client_id: client_id,
+        answer,
+    };
+    let text = serde_json::to_string(&msg_from_client).unwrap().into();
+
+    let mut server_tx = server_tx.lock().await;
+    _ = server_tx.send(ws::Message::Text(text)).await;
 }

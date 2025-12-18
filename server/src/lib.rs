@@ -38,7 +38,7 @@ pub enum MessageFromClient {
     Answer {
         to_client_id: String,
         from_client_id: String,
-        answer: serde_json::Value,
+        answer: RTCSessionDescription,
     },
     IceCandidate {
         to_client_id: String,
