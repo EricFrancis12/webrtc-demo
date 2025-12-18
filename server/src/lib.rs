@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use axum::extract::ws::{self, Utf8Bytes};
 use serde::{Deserialize, Serialize};
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
@@ -32,7 +33,7 @@ pub enum MessageFromClient {
     Offer {
         to_client_id: String,
         from_client_id: String,
-        offer: serde_json::Value,
+        offer: RTCSessionDescription,
     },
     Answer {
         to_client_id: String,
