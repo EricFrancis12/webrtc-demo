@@ -1,6 +1,21 @@
 use std::io::{self, Write};
 
-fn main() {
+use futures::StreamExt;
+use tokio_tungstenite::connect_async;
+
+#[tokio::main]
+async fn main() {
+    let client_id = "5678";
+    let url = format!("ws://localhost:3000/ws?client_id={}", client_id);
+
+    println!("Connecting to ws server at {url}");
+
+    let (ws_stream, _) = connect_async(url).await.unwrap();
+    let (write, read) = ws_stream.split();
+
+    println!("Connected to ws server");
+
+    println!();
     println!("WebRTC Client");
     println!("Commands:");
     println!("  1. list - List all rooms");
