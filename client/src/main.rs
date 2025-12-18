@@ -16,7 +16,7 @@ use server::{MessageFromClient, MessageFromServer};
 use webrtc::{
     api::APIBuilder,
     data_channel::RTCDataChannel,
-    ice_transport::ice_server::RTCIceServer,
+    ice_transport::{ice_candidate::RTCIceCandidate, ice_server::RTCIceServer},
     peer_connection::{
         RTCPeerConnection, configuration::RTCConfiguration,
         sdp::session_description::RTCSessionDescription,
@@ -68,7 +68,9 @@ async fn main() {
                     M::Rooms { rooms } => println!("Rooms: {rooms:?}"),
                     M::RoomCreated { room_id } => println!("You are now hosting Room {room_id}"),
                     M::GuestJoined { guest_id } => {
-                        let mut peer = setup_peer_connection(&guest_id).await;
+                        let mut peer =
+                            setup_peer_connection(client_id.clone(), &guest_id, server_tx.clone())
+                                .await;
 
                         let data_channel = peer
                             .rpc_conn
@@ -101,7 +103,12 @@ async fn main() {
                         _ = server_tx.send(ws::Message::Text(text)).await;
                     }
                     M::JoinedRoom { room } => {
-                        let peer = setup_peer_connection(&room.host_id).await;
+                        let peer = setup_peer_connection(
+                            client_id.clone(),
+                            &room.host_id,
+                            server_tx.clone(),
+                        )
+                        .await;
 
                         let host_id_clone = room.host_id.clone();
                         let conns_clone = conns.clone();
@@ -146,12 +153,18 @@ async fn main() {
                         from_client_id,
                         answer,
                         ..
-                    } => println!("TODO: Answer received from {from_client_id}: {answer:?}"),
+                    } => {
+                        println!("Answer received from {from_client_id}: {answer:?}");
+                        handle_answer(from_client_id, answer, conns.clone()).await;
+                    }
                     M::IceCandidate {
                         to_client_id,
                         from_client_id,
                         candidate,
-                    } => todo!(),
+                    } => {
+                        println!("ICE Candidate received from {from_client_id}: {candidate:?}");
+                        handle_ice_candidate(from_client_id, candidate, conns.clone()).await;
+                    }
                     _ => println!(
                         "[Should not happen] Unhandled message from peer: {msg_from_peer:?}"
                     ),
@@ -264,7 +277,11 @@ async fn main() {
     }
 }
 
-async fn setup_peer_connection(peer_id: impl Into<String>) -> Peer {
+async fn setup_peer_connection(
+    client_id: String,
+    peer_id: impl Into<String>,
+    server_tx: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, ws::Message>>>,
+) -> Peer {
     let api = APIBuilder::new().build();
 
     let config = RTCConfiguration {
@@ -291,17 +308,26 @@ async fn setup_peer_connection(peer_id: impl Into<String>) -> Peer {
         })
     }));
 
+    let peer_id_clone = peer_id.into().clone();
+    let server_tx_clone = server_tx.clone();
+
     rpc_conn.on_ice_candidate(Box::new(move |candidate| {
+        let client_id = client_id.clone();
+        let peer_id = peer_id_clone.clone();
+        let server_tx = server_tx_clone.clone();
         Box::pin(async move {
             if let Some(candidate) = candidate {
-                println!("TODO: Received ICE Candidate: {candidate:?}");
+                println!("Received ICE Candidate: {candidate:?}");
 
-                //         ws.send(JSON.stringify({
-                //             type: "IceCandidate",
-                //             to_client_id: peer_id,
-                //             from_client_id: client_id,
-                //             candidate: e.candidate
-                //         }));
+                let msg_from_client = MessageFromClient::IceCandidate {
+                    to_client_id: peer_id,
+                    from_client_id: client_id.clone(),
+                    candidate,
+                };
+                let text = serde_json::to_string(&msg_from_client).unwrap().into();
+
+                let mut server_tx = server_tx.lock().await;
+                _ = server_tx.send(ws::Message::Text(text)).await;
             }
         })
     }));
@@ -345,7 +371,7 @@ async fn handle_offer(
     server_tx: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, ws::Message>>>,
     conns: Arc<Mutex<HashMap<String, Peer>>>,
 ) {
-    let peer = setup_peer_connection(&from_peer_id).await;
+    let peer = setup_peer_connection(client_id.clone(), &from_peer_id, server_tx.clone()).await;
 
     let peer_id_clone = from_peer_id.clone();
     let conns_clone = conns.clone();
@@ -384,4 +410,27 @@ async fn handle_offer(
 
     let mut server_tx = server_tx.lock().await;
     _ = server_tx.send(ws::Message::Text(text)).await;
+}
+
+async fn handle_answer(
+    from_peer_id: String,
+    answer: RTCSessionDescription,
+    conns: Arc<Mutex<HashMap<String, Peer>>>,
+) {
+    let mut conns = conns.lock().await;
+    let peer = conns.get_mut(&from_peer_id).unwrap();
+    peer.rpc_conn.set_remote_description(answer).await.unwrap();
+}
+
+async fn handle_ice_candidate(
+    from_peer_id: String,
+    candidate: RTCIceCandidate,
+    conns: Arc<Mutex<HashMap<String, Peer>>>,
+) {
+    let mut conns = conns.lock().await;
+    let peer = conns.get_mut(&from_peer_id).unwrap();
+    peer.rpc_conn
+        .add_ice_candidate(candidate.to_json().unwrap())
+        .await
+        .unwrap();
 }

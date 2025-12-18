@@ -2,7 +2,10 @@ use std::collections::HashSet;
 
 use axum::extract::ws::{self, Utf8Bytes};
 use serde::{Deserialize, Serialize};
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::{
+    ice_transport::ice_candidate::RTCIceCandidate,
+    peer_connection::sdp::session_description::RTCSessionDescription,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
@@ -43,7 +46,7 @@ pub enum MessageFromClient {
     IceCandidate {
         to_client_id: String,
         from_client_id: String,
-        candidate: serde_json::Value,
+        candidate: RTCIceCandidate,
     },
 }
 
