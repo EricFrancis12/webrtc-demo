@@ -42,12 +42,14 @@ async fn main() {
     let server_tx_clone = server_tx.clone();
 
     let conns: Arc<Mutex<HashMap<String, Peer>>> = Arc::new(Mutex::new(HashMap::new()));
+    let conns_clone = conns.clone();
 
     let done = Arc::new(AtomicBool::new(false));
     let done_clone = done.clone();
 
     _ = tokio::spawn(async move {
         let server_tx = server_tx_clone.clone();
+        let conns = conns_clone.clone();
 
         while let Some(Ok(ws_msg)) = server_rx.next().await {
             let ws::Message::Text(text) = &ws_msg else {
@@ -158,9 +160,9 @@ async fn main() {
                         handle_answer(from_client_id, answer, conns.clone()).await;
                     }
                     M::IceCandidate {
-                        to_client_id,
                         from_client_id,
                         candidate,
+                        ..
                     } => {
                         println!("ICE Candidate received from {from_client_id}: {candidate:?}");
                         handle_ice_candidate(from_client_id, candidate, conns.clone()).await;
@@ -240,8 +242,19 @@ async fn main() {
                 io::stdout().flush().unwrap();
                 let mut message = String::new();
                 io::stdin().read_line(&mut message).unwrap();
-                println!("Sending: {}", message.trim());
-                // TODO: Send message through data channel
+                message = message.trim().to_owned();
+                // Send message through data channel
+                let mut conns = conns.lock().await;
+                for (peer_id, conn) in conns.iter_mut() {
+                    println!("Sending message to peer {peer_id}");
+                    if let Some(data_channel) = &mut conn.data_channel {
+                        _ = data_channel.send_text(message.clone()).await;
+                    } else {
+                        println!(
+                            "[Should not happen] Attempting to send to peer {peer_id}, who does not have a data channel"
+                        );
+                    }
+                }
             }
             "start" | "5" => {
                 println!("Starting game & disconnecting from server...");
