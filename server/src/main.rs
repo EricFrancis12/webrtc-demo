@@ -209,6 +209,8 @@ const PORT: u16 = 3000;
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let state = State::new();
 
     let app = Router::new()
@@ -234,7 +236,7 @@ async fn main() {
 }
 
 async fn handle_serve_html() -> Html<&'static str> {
-    Html(include_str!("../index.html"))
+    Html(include_str!("../../index.html"))
 }
 
 async fn handle_healthz() -> &'static str {
