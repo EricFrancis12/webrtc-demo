@@ -30,13 +30,12 @@ struct Client {
 
 impl Client {
     fn host_room_id(&self) -> u32 {
-        hash32(&(self.id.clone(), self.addr))
+        hash32(&(&self.id, self.addr))
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Room {
-    id: u32,
     // TODO: ...
     // max_size: usize,
     // password: Option<String>,
@@ -77,6 +76,23 @@ enum MessageFromClient {
         from_client_id: String,
         candidate: serde_json::Value,
     },
+}
+
+pub enum MessageFromClientConversionError {
+    NonTextMessage,
+    JsonParseError(serde_json::error::Error),
+}
+
+impl TryFrom<&ws::Message> for MessageFromClient {
+    type Error = MessageFromClientConversionError;
+
+    fn try_from(ws_msg: &ws::Message) -> Result<Self, Self::Error> {
+        let ws::Message::Text(text) = ws_msg else {
+            return Err(MessageFromClientConversionError::NonTextMessage);
+        };
+        serde_json::from_str(&text)
+            .map_err(|err| MessageFromClientConversionError::JsonParseError(err))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -195,7 +211,6 @@ async fn handle_ws(
 }
 
 async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state: State) {
-    println!("Starting ws loop");
     while let Some(Ok(ws_msg)) = from_client.next().await {
         if let ws::Message::Close(_) = ws_msg {
             println!("Client connection closed");
@@ -209,21 +224,11 @@ async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state:
             return;
         }
 
-        let ws::Message::Text(text) = ws_msg else {
+        let Ok(msg_from_client) = MessageFromClient::try_from(&ws_msg) else {
             println!("[Should not happen] Unknown message from client: {ws_msg:?}");
             let mut to_client = client.comm.lock().await;
             _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
             continue;
-        };
-
-        let msg_from_client = match serde_json::from_str::<MessageFromClient>(&text) {
-            Ok(m) => m,
-            Err(err) => {
-                println!("[Should not happen] Error parsing client message `{text}`: {err}");
-                let mut to_client = client.comm.lock().await;
-                _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
-                continue;
-            }
         };
 
         match msg_from_client {
@@ -239,7 +244,7 @@ async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state:
             MessageFromClient::Offer { to_client_id, .. }
             | MessageFromClient::Answer { to_client_id, .. }
             | MessageFromClient::IceCandidate { to_client_id, .. } => {
-                forward_to_client(to_client_id, text.clone(), &state).await
+                forward_to_client(to_client_id, ws_msg, &state).await
             }
         }
     }
@@ -306,7 +311,6 @@ async fn handle_create_room(client: &Client, state: &State) {
     rooms.insert(
         room_id,
         Room {
-            id: room_id,
             host_id: client.id.clone(),
             guest_ids: HashSet::new(),
         },
@@ -377,9 +381,9 @@ async fn handle_delete_room(room_id: u32, client: &Client, state: &State) {
     todo!("notify guests that the host deleted this room")
 }
 
-async fn forward_to_client(to_client_id: String, text: Utf8Bytes, state: &State) {
+async fn forward_to_client(to_client_id: String, ws_msg: ws::Message, state: &State) {
     let clients = state.clients.lock().await;
     let client = clients.get(&to_client_id).unwrap();
     let mut to_client = client.comm.lock().await;
-    _ = to_client.send(ws::Message::Text(text)).await;
+    _ = to_client.send(ws_msg).await;
 }
