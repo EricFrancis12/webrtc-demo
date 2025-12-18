@@ -21,19 +21,18 @@ use fxhash::hash32;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+type ClientTx = SplitSink<WebSocket, ws::Message>;
+type ClientRx = SplitStream<WebSocket>;
+
 #[derive(Debug, Clone)]
 struct Client {
     id: String,
     addr: SocketAddr,
-    comm: Arc<Mutex<SplitSink<WebSocket, ws::Message>>>,
+    comm: Arc<Mutex<ClientTx>>,
 }
 
 impl Client {
-    fn new(
-        id: impl Into<String>,
-        addr: SocketAddr,
-        comm: SplitSink<WebSocket, ws::Message>,
-    ) -> Self {
+    fn new(id: impl Into<String>, addr: SocketAddr, comm: ClientTx) -> Self {
         Self {
             id: id.into(),
             addr,
@@ -102,6 +101,15 @@ struct Room {
 struct State {
     clients: Arc<Mutex<HashMap<String, Client>>>,
     rooms: Arc<Mutex<HashMap<u32, Room>>>,
+}
+
+impl State {
+    fn new() -> Self {
+        Self {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            rooms: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -182,10 +190,7 @@ const PORT: u16 = 3000;
 
 #[tokio::main]
 async fn main() {
-    let state = State {
-        clients: Arc::new(Mutex::new(HashMap::new())),
-        rooms: Arc::new(Mutex::new(HashMap::new())),
-    };
+    let state = State::new();
 
     let app = Router::new()
         .route("/", get(handle_serve_html))
@@ -226,8 +231,8 @@ async fn handle_ws(
         let client_id = query.client_id;
         println!("New ws connection from client_id {client_id}");
 
-        let (to_client, from_client) = socket.split();
-        let mut client = Client::new(&client_id, addr, to_client);
+        let (client_tx, client_rx) = socket.split();
+        let mut client = Client::new(&client_id, addr, client_tx);
 
         if let Some(reason) = should_disconnect(&client_id, &state).await {
             client.disconnect(reason).await;
@@ -239,7 +244,7 @@ async fn handle_ws(
 
         let state = state.clone();
 
-        _ = tokio::spawn(async move { ws_loop(client, from_client, state).await });
+        _ = tokio::spawn(async move { ws_loop(client, client_rx, state).await });
     })
 }
 
@@ -254,8 +259,8 @@ async fn should_disconnect(client_id: &str, state: &State) -> Option<DisconnectR
     None
 }
 
-async fn ws_loop(mut client: Client, mut from_client: SplitStream<WebSocket>, state: State) {
-    while let Some(Ok(ws_msg)) = from_client.next().await {
+async fn ws_loop(mut client: Client, mut client_rx: ClientRx, state: State) {
+    while let Some(Ok(ws_msg)) = client_rx.next().await {
         if let ws::Message::Close(_) = ws_msg {
             handle_connection_closed(&client, &state).await;
             return;
