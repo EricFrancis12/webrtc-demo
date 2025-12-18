@@ -29,6 +29,61 @@ struct Client {
 }
 
 impl Client {
+    fn new(
+        id: impl Into<String>,
+        addr: SocketAddr,
+        comm: SplitSink<WebSocket, ws::Message>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            addr,
+            comm: Arc::new(Mutex::new(comm)),
+        }
+    }
+
+    async fn send(&mut self, ws_msg: impl Into<ws::Message>) {
+        let mut comm = self.comm.lock().await;
+        if let Err(err) = comm.send(ws_msg.into()).await {
+            println!("Error sending to client {}: {err}", self.id);
+        }
+    }
+
+    async fn disconnect(&mut self, reason: DisconnectReason) {
+        let mut comm = self.comm.lock().await;
+        if let Err(err) = comm
+            .send(MessageFromServer::Disconnect { reason }.into())
+            .await
+        {
+            println!("Error sending to client {}: {err}", self.id);
+        }
+        if let Err(err) = comm.close().await {
+            println!("Error closing connection for client {}: {err}", self.id);
+        }
+    }
+
+    async fn bad_request(&mut self) {
+        self.send(MessageFromServer::BadRequest).await
+    }
+
+    async fn client_not_found(&mut self) {
+        self.send(MessageFromServer::ClientNotFound).await
+    }
+
+    async fn room_created(&mut self, room_id: u32) {
+        self.send(MessageFromServer::RoomCreated { room_id }).await
+    }
+
+    async fn guest_joined(&mut self, guest_id: impl Into<String>) {
+        self.send(MessageFromServer::GuestJoined {
+            guest_id: guest_id.into(),
+        })
+        .await
+    }
+
+    async fn joined_room(&mut self, room: Room) {
+        self.send(MessageFromServer::JoinedRoom { room }).await
+    }
+
     fn host_room_id(&self) -> u32 {
         hash32(&(&self.id, self.addr))
     }
@@ -95,7 +150,7 @@ impl TryFrom<&ws::Message> for MessageFromClient {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum MessageFromServer {
     Ok,
@@ -107,16 +162,16 @@ enum MessageFromServer {
     JoinedRoom { room: Room },
 }
 
-impl MessageFromServer {
-    fn ws_msg(&self) -> ws::Message {
-        let text: Utf8Bytes = serde_json::to_string(self)
+impl From<MessageFromServer> for ws::Message {
+    fn from(msg_from_server: MessageFromServer) -> Self {
+        let text: Utf8Bytes = serde_json::to_string(&msg_from_server)
             .expect("MessageFromServer should serialize")
             .into();
-        ws::Message::Text(text)
+        Self::Text(text)
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum DisconnectReason {
     InvalidClientId,
     ClientIdTaken,
@@ -171,21 +226,13 @@ async fn handle_ws(
         let client_id = query.client_id;
         println!("New ws connection from client_id {client_id}");
 
-        let (mut to_client, from_client) = socket.split();
+        let (to_client, from_client) = socket.split();
+        let mut client = Client::new(&client_id, addr, to_client);
 
         if let Some(reason) = should_disconnect(&client_id, &state).await {
-            _ = to_client
-                .send(MessageFromServer::Disconnect { reason }.ws_msg())
-                .await;
-            _ = to_client.close();
+            client.disconnect(reason).await;
             return;
         }
-
-        let client = Client {
-            id: client_id.clone(),
-            addr,
-            comm: Arc::new(Mutex::new(to_client)),
-        };
 
         let mut clients = state.clients.lock().await;
         clients.insert(client_id.clone(), client.clone());
@@ -207,7 +254,7 @@ async fn should_disconnect(client_id: &str, state: &State) -> Option<DisconnectR
     None
 }
 
-async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state: State) {
+async fn ws_loop(mut client: Client, mut from_client: SplitStream<WebSocket>, state: State) {
     while let Some(Ok(ws_msg)) = from_client.next().await {
         if let ws::Message::Close(_) = ws_msg {
             handle_connection_closed(&client, &state).await;
@@ -216,25 +263,21 @@ async fn ws_loop(client: Client, mut from_client: SplitStream<WebSocket>, state:
 
         let Ok(msg_from_client) = MessageFromClient::try_from(&ws_msg) else {
             println!("[Should not happen] Unknown message from client: {ws_msg:?}");
-            let mut to_client = client.comm.lock().await;
-            _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+            client.bad_request().await;
             continue;
         };
 
+        use MessageFromClient as M;
         match msg_from_client {
-            MessageFromClient::StartGame => handle_start_game(&client, &state).await,
-            MessageFromClient::GetRooms => handle_get_rooms().await,
-            MessageFromClient::CreateRoom => handle_create_room(&client, &state).await,
-            MessageFromClient::JoinRoom { room_id } => {
-                handle_join_room(room_id, &client, &state).await
-            }
-            MessageFromClient::DeleteRoom { room_id } => {
-                handle_delete_room(room_id, &client, &state).await
-            }
-            MessageFromClient::Offer { to_client_id, .. }
-            | MessageFromClient::Answer { to_client_id, .. }
-            | MessageFromClient::IceCandidate { to_client_id, .. } => {
-                forward_to_client(to_client_id, ws_msg, &client, &state).await
+            M::StartGame => handle_start_game(&mut client, &state).await,
+            M::GetRooms => handle_get_rooms().await,
+            M::CreateRoom => handle_create_room(&mut client, &state).await,
+            M::JoinRoom { room_id } => handle_join_room(room_id, &mut client, &state).await,
+            M::DeleteRoom { room_id } => handle_delete_room(room_id, &mut client, &state).await,
+            M::Offer { to_client_id, .. }
+            | M::Answer { to_client_id, .. }
+            | M::IceCandidate { to_client_id, .. } => {
+                forward_to_client(to_client_id, ws_msg, &mut client, &state).await
             }
         }
     }
@@ -250,48 +293,29 @@ async fn handle_connection_closed(client: &Client, state: &State) {
     }
 }
 
-async fn handle_start_game(client: &Client, state: &State) {
+async fn handle_start_game(client: &mut Client, state: &State) {
     let mut rooms = state.rooms.lock().await;
 
     let room_id = client.host_room_id();
     let Some(room) = rooms.get(&room_id) else {
-        let mut to_client = client.comm.lock().await;
-        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        client.bad_request().await;
         return;
     };
 
+    client.disconnect(DisconnectReason::HostStartedGame).await;
+
     let mut clients = state.clients.lock().await;
     for guest_id in &room.guest_ids {
-        if let Some(guest_client) = clients.get(guest_id) {
-            let mut to_client = guest_client.comm.lock().await;
-            _ = to_client
-                .send(
-                    MessageFromServer::Disconnect {
-                        reason: DisconnectReason::HostStartedGame,
-                    }
-                    .ws_msg(),
-                )
+        if let Some(guest_client) = clients.get_mut(guest_id) {
+            guest_client
+                .disconnect(DisconnectReason::HostStartedGame)
                 .await;
-            _ = to_client.close();
         } else {
             println!(
                 "[Should not happen] Guest id {guest_id} is present in room {room_id}, but is not in clients"
             );
         }
-
-        clients.remove(guest_id);
     }
-
-    let mut to_client = client.comm.lock().await;
-    _ = to_client
-        .send(
-            MessageFromServer::Disconnect {
-                reason: DisconnectReason::HostStartedGame,
-            }
-            .ws_msg(),
-        )
-        .await;
-    _ = to_client.close();
 
     rooms.remove(&room_id);
 }
@@ -300,14 +324,12 @@ async fn handle_get_rooms() {
     todo!();
 }
 
-async fn handle_create_room(client: &Client, state: &State) {
-    let mut to_client = client.comm.lock().await;
+async fn handle_create_room(client: &mut Client, state: &State) {
     let mut rooms = state.rooms.lock().await;
-
     let room_id = client.host_room_id();
 
     if rooms.contains_key(&room_id) {
-        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        client.bad_request().await;
         return;
     }
 
@@ -321,70 +343,54 @@ async fn handle_create_room(client: &Client, state: &State) {
 
     println!("Room {room_id} created by client {}", client.id);
 
-    _ = to_client
-        .send(MessageFromServer::RoomCreated { room_id }.ws_msg())
-        .await;
+    client.room_created(room_id).await;
 }
 
-async fn handle_join_room(room_id: u32, client: &Client, state: &State) {
-    let mut to_client = client.comm.lock().await;
-    let clients = state.clients.lock().await;
+async fn handle_join_room(room_id: u32, client: &mut Client, state: &State) {
+    let mut clients = state.clients.lock().await;
     let mut rooms = state.rooms.lock().await;
 
     let Some(room) = rooms.get_mut(&room_id) else {
-        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        client.bad_request().await;
         return;
     };
-
     if room.host_id == client.id {
-        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        client.bad_request().await;
         return;
     }
 
-    let ws_msg = MessageFromServer::GuestJoined {
-        guest_id: client.id.clone(),
-    }
-    .ws_msg();
-
-    room.guest_ids.insert(client.id.clone());
-
-    let Some(host) = clients.get(&room.host_id) else {
+    let Some(host) = clients.get_mut(&room.host_id) else {
         println!(
             "[Should not happen] Correcting illegal state: room {room_id} exists with host {} not in clients",
             room.host_id
         );
-        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        client.bad_request().await;
         return;
     };
 
-    let mut to_host = host.comm.lock().await;
-    _ = to_host.send(ws_msg.clone()).await;
+    room.guest_ids.insert(client.id.clone());
+    client.joined_room(room.clone()).await;
+
+    host.guest_joined(client.id.clone()).await;
 
     for guest_id in &room.guest_ids {
-        if guest_id == &client.id {
-            _ = to_client
-                .send(MessageFromServer::JoinedRoom { room: room.clone() }.ws_msg())
-                .await;
-            continue;
+        if guest_id != &client.id {
+            let guest = clients.get_mut(guest_id).unwrap();
+            guest.guest_joined(client.id.clone()).await;
         }
-
-        let guest = clients.get(guest_id).unwrap();
-        let mut to_guest = guest.comm.lock().await;
-        _ = to_guest.send(ws_msg.clone()).await;
     }
 }
 
-async fn handle_delete_room(room_id: u32, client: &Client, state: &State) {
-    let mut to_client = client.comm.lock().await;
+async fn handle_delete_room(room_id: u32, client: &mut Client, state: &State) {
     let mut rooms = state.rooms.lock().await;
 
     let Some(room) = rooms.get_mut(&room_id) else {
-        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        client.bad_request().await;
         return;
     };
 
     if room.host_id != client.id {
-        _ = to_client.send(MessageFromServer::BadRequest.ws_msg()).await;
+        client.bad_request().await;
         return;
     }
 
@@ -395,15 +401,13 @@ async fn handle_delete_room(room_id: u32, client: &Client, state: &State) {
 async fn forward_to_client(
     to_client_id: String,
     ws_msg: ws::Message,
-    client: &Client,
+    client: &mut Client,
     state: &State,
 ) {
-    let clients = state.clients.lock().await;
-    let Some(target_client) = clients.get(&to_client_id) else {
-        let mut comm = client.comm.lock().await;
-        _ = comm.send(MessageFromServer::ClientNotFound.ws_msg()).await;
+    let mut clients = state.clients.lock().await;
+    let Some(target_client) = clients.get_mut(&to_client_id) else {
+        client.client_not_found().await;
         return;
     };
-    let mut to_client = target_client.comm.lock().await;
-    _ = to_client.send(ws_msg).await;
+    target_client.send(ws_msg).await;
 }
