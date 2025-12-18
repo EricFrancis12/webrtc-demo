@@ -34,6 +34,8 @@ struct Client {
 }
 
 impl Client {
+    const MAX_ID_LEN: usize = 64;
+
     fn new(id: impl Into<String>, addr: SocketAddr, comm: ClientTx) -> Self {
         Self {
             id: id.into(),
@@ -127,6 +129,8 @@ impl State {
 #[serde(tag = "type")]
 enum MessageFromClient {
     StartGame,
+
+    // Room CRUD
     GetRooms,
     CreateRoom,
     JoinRoom {
@@ -135,6 +139,8 @@ enum MessageFromClient {
     DeleteRoom {
         room_id: u32,
     },
+
+    // WebRTC
     Offer {
         to_client_id: String,
         from_client_id: String,
@@ -176,6 +182,7 @@ enum MessageFromServer {
     BadRequest,
     ClientNotFound,
     Disconnect { reason: DisconnectReason },
+    Rooms { rooms: Vec<Room> },
     RoomCreated { room_id: u32 },
     GuestJoined { guest_id: String },
     JoinedRoom { room: Room },
@@ -260,7 +267,7 @@ async fn handle_ws(
         let (client_tx, client_rx) = socket.split();
         let mut client = Client::new(&client_id, addr, client_tx);
 
-        if let Some(reason) = should_disconnect(&client_id, &state).await {
+        if let Some(reason) = verify(&client_id, &state).await {
             client.disconnect(reason).await;
             return;
         }
@@ -274,8 +281,8 @@ async fn handle_ws(
     })
 }
 
-async fn should_disconnect(client_id: &str, state: &State) -> Option<DisconnectReason> {
-    if client_id.is_empty() {
+async fn verify(client_id: &str, state: &State) -> Option<DisconnectReason> {
+    if client_id.is_empty() || client_id.len() > Client::MAX_ID_LEN {
         return Some(DisconnectReason::InvalidClientId);
     }
     let clients = state.clients.lock().await;
@@ -301,7 +308,7 @@ async fn ws_loop(mut client: Client, mut client_rx: ClientRx, state: State) {
         use MessageFromClient as M;
         match msg_from_client {
             M::StartGame => handle_start_game(&mut client, &state).await,
-            M::GetRooms => handle_get_rooms().await,
+            M::GetRooms => handle_get_rooms(&mut client, &state).await,
             M::CreateRoom => handle_create_room(&mut client, &state).await,
             M::JoinRoom { room_id } => handle_join_room(room_id, &mut client, &state).await,
             M::DeleteRoom { room_id } => handle_delete_room(room_id, &mut client, &state).await,
@@ -349,8 +356,10 @@ async fn handle_start_game(client: &mut Client, state: &State) {
     rooms.remove(&room_id);
 }
 
-async fn handle_get_rooms() {
-    todo!();
+async fn handle_get_rooms(client: &mut Client, state: &State) {
+    let rooms = state.rooms.lock().await;
+    let rooms = rooms.iter().map(|(_, room)| room.clone()).collect();
+    client.send(MessageFromServer::Rooms { rooms }).await;
 }
 
 async fn handle_create_room(client: &mut Client, state: &State) {

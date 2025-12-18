@@ -46,6 +46,7 @@
 
         ws.onopen = () => {
             console.log("Connected to ws server");
+            ws.send(JSON.stringify({ type: "GetRooms" }));
         };
 
         ws.onmessage = async (e) => {
@@ -59,6 +60,7 @@
                 case "Disconnect": {
                     if (ws) ws.close();
                 }; break;
+                case "Rooms": console.log("All rooms:", msg.rooms); break;
                 case "RoomCreated": {
                     room = {
                         id: msg.room_id,
