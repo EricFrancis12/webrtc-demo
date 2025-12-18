@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    env,
     net::SocketAddr,
     sync::Arc,
 };
@@ -10,8 +11,8 @@ use axum::{
         self, ConnectInfo, Query, WebSocketUpgrade,
         ws::{self, Utf8Bytes, WebSocket},
     },
-    response::{Html, IntoResponse},
-    routing::get,
+    response::{Html, IntoResponse, Redirect},
+    routing::{any, get},
 };
 use futures::{
     SinkExt, StreamExt,
@@ -207,6 +208,8 @@ async fn main() {
         .route("/", get(handle_serve_html))
         .route("/index.html", get(handle_serve_html))
         .route("/ws", get(handle_ws))
+        .route("/healthz", any(handle_healthz))
+        .fallback(any(handle_catch_all))
         .with_state(state);
 
     info!("Server running on port {PORT}");
@@ -225,6 +228,18 @@ async fn main() {
 
 async fn handle_serve_html() -> Html<&'static str> {
     Html(include_str!("../index.html"))
+}
+
+async fn handle_healthz() -> &'static str {
+    "service ok"
+}
+
+async fn handle_catch_all() -> impl IntoResponse {
+    if let Ok(url) = env::var("CATCH_ALL_REDIRECT_URL") {
+        Redirect::to(&url)
+    } else {
+        Redirect::to("/")
+    }
 }
 
 #[derive(Deserialize)]
