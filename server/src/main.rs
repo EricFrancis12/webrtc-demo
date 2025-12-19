@@ -209,8 +209,7 @@ async fn verify(client_id: &str, state: &State) -> Option<DisconnectReason> {
 async fn ws_loop(mut client: Client, mut client_rx: ClientRx, state: State) {
     while let Some(Ok(ws_msg)) = client_rx.next().await {
         if let ws::Message::Close(_) = ws_msg {
-            handle_connection_closed(&client, &state).await;
-            return;
+            break;
         }
 
         let Ok(msg_from_client) = MessageFromClient::try_from(&ws_msg) else {
@@ -233,15 +232,23 @@ async fn ws_loop(mut client: Client, mut client_rx: ClientRx, state: State) {
             }
         }
     }
+
+    handle_close_connection(&client, &state).await;
 }
 
-async fn handle_connection_closed(client: &Client, state: &State) {
+async fn handle_close_connection(client: &Client, state: &State) {
+    // TODO: remove clients from rooms they were hosting or guests of
+
+    // TODO: close connections of each client.comm?
+
     let mut clients = state.clients.lock().await;
     if clients.remove(&client.id).is_none() {
         warn!(
             "Client {} disconnected, but was not in the clients map",
             client.id
         );
+    } else {
+        info!("Client {} disconnected", client.id);
     }
 }
 
