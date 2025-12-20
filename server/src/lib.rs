@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use axum::extract::ws::{self, Utf8Bytes};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use webrtc::{
     ice_transport::ice_candidate::RTCIceCandidate,
     peer_connection::sdp::session_description::RTCSessionDescription,
@@ -13,8 +14,8 @@ pub struct Room {
     // TODO: ...
     // max_size: usize,
     // password: Option<String>,
-    pub host_id: String,
-    pub guest_ids: HashSet<String>,
+    pub host_id: Uuid,
+    pub guest_ids: HashSet<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,18 +35,18 @@ pub enum MessageFromClient {
 
     // WebRTC
     Offer {
-        to_client_id: String,
-        from_client_id: String,
+        to_client_id: Uuid,
+        from_client_id: Uuid,
         offer: RTCSessionDescription,
     },
     Answer {
-        to_client_id: String,
-        from_client_id: String,
+        to_client_id: Uuid,
+        from_client_id: Uuid,
         answer: RTCSessionDescription,
     },
     IceCandidate {
-        to_client_id: String,
-        from_client_id: String,
+        to_client_id: Uuid,
+        from_client_id: Uuid,
         candidate: RTCIceCandidate,
     },
 }
@@ -76,7 +77,7 @@ pub enum MessageFromServer {
     Disconnect { reason: DisconnectReason },
     Rooms { rooms: Vec<Room> },
     RoomCreated { room_id: u32 },
-    GuestJoined { guest_id: String },
+    GuestJoined { guest_id: Uuid },
     JoinedRoom { room: Room },
     HostDeletedRoom,
 }

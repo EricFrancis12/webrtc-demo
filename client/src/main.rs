@@ -5,9 +5,9 @@ use std::{
 };
 
 use futures::{SinkExt, StreamExt, stream::SplitSink};
-use rand;
 use tokio::{net::TcpStream, sync::Mutex};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite as ws};
+use uuid::Uuid;
 use webrtc::{
     api::APIBuilder,
     data_channel::RTCDataChannel,
@@ -27,7 +27,7 @@ struct Peer {
 
 #[tokio::main]
 async fn main() {
-    let client_id = rand::random::<u32>().to_string();
+    let client_id = Uuid::new_v4();
     let url = format!("ws://localhost:3000/ws?client_id={}", client_id);
 
     println!("Connecting to ws server at {url}");
@@ -38,7 +38,7 @@ async fn main() {
     let server_tx = Arc::new(Mutex::new(server_tx));
     let server_tx_clone = server_tx.clone();
 
-    let conns: Arc<Mutex<HashMap<String, Peer>>> = Arc::new(Mutex::new(HashMap::new()));
+    let conns: Arc<Mutex<HashMap<Uuid, Peer>>> = Arc::new(Mutex::new(HashMap::new()));
     let conns_clone = conns.clone();
 
     _ = tokio::spawn(async move {
@@ -64,8 +64,7 @@ async fn main() {
                     M::RoomCreated { room_id } => println!("You are now hosting Room {room_id}"),
                     M::GuestJoined { guest_id } => {
                         let mut peer =
-                            setup_peer_connection(client_id.clone(), &guest_id, server_tx.clone())
-                                .await;
+                            setup_peer_connection(client_id, guest_id, server_tx.clone()).await;
 
                         let data_channel = peer
                             .rpc_conn
@@ -85,11 +84,11 @@ async fn main() {
                             .unwrap();
 
                         let mut conns = conns.lock().await;
-                        conns.insert(guest_id.clone(), peer);
+                        conns.insert(guest_id, peer);
 
                         let msg_from_client = MessageFromClient::Offer {
                             to_client_id: guest_id,
-                            from_client_id: client_id.clone(),
+                            from_client_id: client_id,
                             offer,
                         };
                         let text = serde_json::to_string(&msg_from_client).unwrap().into();
@@ -98,22 +97,16 @@ async fn main() {
                         _ = server_tx.send(ws::Message::Text(text)).await;
                     }
                     M::JoinedRoom { room } => {
-                        let peer = setup_peer_connection(
-                            client_id.clone(),
-                            &room.host_id,
-                            server_tx.clone(),
-                        )
-                        .await;
+                        let peer =
+                            setup_peer_connection(client_id, room.host_id, server_tx.clone()).await;
 
-                        let host_id_clone = room.host_id.clone();
                         let conns_clone = conns.clone();
 
                         peer.rpc_conn.on_data_channel(Box::new(move |data_channel| {
-                            let host_id = host_id_clone.clone();
                             let conns = conns_clone.clone();
                             Box::pin(async move {
                                 let mut conns = conns.lock().await;
-                                let peer = conns.get_mut(&host_id).unwrap();
+                                let peer = conns.get_mut(&room.host_id).unwrap();
 
                                 setup_data_channel(&data_channel);
                                 peer.data_channel = Some(data_channel);
@@ -136,7 +129,7 @@ async fn main() {
                     } => {
                         println!("Offer received from {from_client_id}: {offer:?}");
                         handle_offer(
-                            client_id.clone(),
+                            client_id,
                             from_client_id,
                             offer,
                             server_tx.clone(),
@@ -288,8 +281,8 @@ async fn main() {
 }
 
 async fn setup_peer_connection(
-    client_id: String,
-    peer_id: impl Into<String>,
+    client_id: Uuid,
+    peer_id: Uuid,
     server_tx: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, ws::Message>>>,
 ) -> Peer {
     let api = APIBuilder::new().build();
@@ -318,12 +311,9 @@ async fn setup_peer_connection(
         })
     }));
 
-    let peer_id_clone = peer_id.into().clone();
     let server_tx_clone = server_tx.clone();
 
     rpc_conn.on_ice_candidate(Box::new(move |candidate| {
-        let client_id = client_id.clone();
-        let peer_id = peer_id_clone.clone();
         let server_tx = server_tx_clone.clone();
         Box::pin(async move {
             if let Some(candidate) = candidate {
@@ -331,7 +321,7 @@ async fn setup_peer_connection(
 
                 let msg_from_client = MessageFromClient::IceCandidate {
                     to_client_id: peer_id,
-                    from_client_id: client_id.clone(),
+                    from_client_id: client_id,
                     candidate,
                 };
                 let text = serde_json::to_string(&msg_from_client).unwrap().into();
@@ -375,26 +365,24 @@ fn setup_data_channel(data_channel: &Arc<RTCDataChannel>) {
 }
 
 async fn handle_offer(
-    client_id: String,
-    from_peer_id: String,
+    client_id: Uuid,
+    from_peer_id: Uuid,
     offer: RTCSessionDescription,
     server_tx: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, ws::Message>>>,
-    conns: Arc<Mutex<HashMap<String, Peer>>>,
+    conns: Arc<Mutex<HashMap<Uuid, Peer>>>,
 ) {
-    let peer = setup_peer_connection(client_id.clone(), &from_peer_id, server_tx.clone()).await;
+    let peer = setup_peer_connection(client_id, from_peer_id, server_tx.clone()).await;
 
-    let peer_id_clone = from_peer_id.clone();
     let conns_clone = conns.clone();
 
     // Guest needs to listen for the data channel created by the host
     peer.rpc_conn.on_data_channel(Box::new(move |data_channel| {
-        let peer_id = peer_id_clone.clone();
         let conns = conns_clone.clone();
         Box::pin(async move {
             println!("Data channel received from host");
 
             let mut conns = conns.lock().await;
-            let peer = conns.get_mut(&peer_id).unwrap();
+            let peer = conns.get_mut(&from_peer_id).unwrap();
 
             setup_data_channel(&data_channel);
             peer.data_channel = Some(data_channel);
@@ -409,7 +397,7 @@ async fn handle_offer(
         .unwrap();
 
     let mut conns = conns.lock().await;
-    conns.insert(from_peer_id.clone(), peer);
+    conns.insert(from_peer_id, peer);
 
     let msg_from_client = MessageFromClient::Answer {
         to_client_id: from_peer_id,
@@ -423,9 +411,9 @@ async fn handle_offer(
 }
 
 async fn handle_answer(
-    from_peer_id: String,
+    from_peer_id: Uuid,
     answer: RTCSessionDescription,
-    conns: Arc<Mutex<HashMap<String, Peer>>>,
+    conns: Arc<Mutex<HashMap<Uuid, Peer>>>,
 ) {
     let mut conns = conns.lock().await;
     let peer = conns.get_mut(&from_peer_id).unwrap();
@@ -433,9 +421,9 @@ async fn handle_answer(
 }
 
 async fn handle_ice_candidate(
-    from_peer_id: String,
+    from_peer_id: Uuid,
     candidate: RTCIceCandidate,
-    conns: Arc<Mutex<HashMap<String, Peer>>>,
+    conns: Arc<Mutex<HashMap<Uuid, Peer>>>,
 ) {
     let mut conns = conns.lock().await;
     let peer = conns.get_mut(&from_peer_id).unwrap();

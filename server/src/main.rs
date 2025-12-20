@@ -22,6 +22,7 @@ use fxhash::hash32;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use server::*;
 
@@ -30,15 +31,13 @@ type ClientRx = SplitStream<WebSocket>;
 
 #[derive(Debug, Clone)]
 struct Client {
-    id: String,
+    id: Uuid,
     addr: SocketAddr,
     comm: Arc<Mutex<ClientTx>>,
 }
 
 impl Client {
-    const MAX_ID_LEN: usize = 64;
-
-    fn new(id: impl Into<String>, addr: SocketAddr, comm: ClientTx) -> Self {
+    fn new(id: Uuid, addr: SocketAddr, comm: ClientTx) -> Self {
         Self {
             id: id.into(),
             addr,
@@ -55,14 +54,21 @@ impl Client {
 
     async fn disconnect(&mut self, reason: DisconnectReason) {
         let mut comm = self.comm.lock().await;
+        Self::disconnect_comm(&mut comm, reason).await
+    }
+
+    async fn disconnect_comm(
+        comm: &mut SplitSink<WebSocket, ws::Message>,
+        reason: DisconnectReason,
+    ) {
         if let Err(err) = comm
             .send(MessageFromServer::Disconnect { reason }.into())
             .await
         {
-            error!("Error sending to client {}: {err}", self.id);
+            error!("Error sending to client: {err}");
         }
         if let Err(err) = comm.close().await {
-            error!("Error closing connection for client {}: {err}", self.id);
+            error!("Error closing connection for client: {err}");
         }
     }
 
@@ -82,11 +88,8 @@ impl Client {
         self.send(MessageFromServer::RoomCreated { room_id }).await
     }
 
-    async fn guest_joined(&mut self, guest_id: impl Into<String>) {
-        self.send(MessageFromServer::GuestJoined {
-            guest_id: guest_id.into(),
-        })
-        .await
+    async fn guest_joined(&mut self, guest_id: Uuid) {
+        self.send(MessageFromServer::GuestJoined { guest_id }).await
     }
 
     async fn joined_room(&mut self, room: Room) {
@@ -104,7 +107,7 @@ impl Client {
 
 #[derive(Clone)]
 struct State {
-    clients: Arc<Mutex<HashMap<String, Client>>>,
+    clients: Arc<Mutex<HashMap<Uuid, Client>>>,
     rooms: Arc<Mutex<HashMap<u32, Room>>>,
 }
 
@@ -175,19 +178,23 @@ async fn handle_ws(
     extract::State(state): extract::State<State>,
 ) -> impl IntoResponse {
     ws.on_upgrade(async move |socket| {
-        let client_id = query.client_id;
-        info!("New ws connection from client_id {client_id}");
+        let client_id_str = query.client_id;
+        info!("New ws connection from `{client_id_str}`");
 
-        let (client_tx, client_rx) = socket.split();
-        let mut client = Client::new(&client_id, addr, client_tx);
+        let (mut client_tx, client_rx) = socket.split();
 
-        if let Some(reason) = verify(&client_id, &state).await {
-            client.disconnect(reason).await;
-            return;
-        }
+        let client_id = match verify(&client_id_str, &state).await {
+            Ok(id) => id,
+            Err(reason) => {
+                Client::disconnect_comm(&mut client_tx, reason).await;
+                return;
+            }
+        };
+
+        let client = Client::new(client_id, addr, client_tx);
 
         let mut clients = state.clients.lock().await;
-        clients.insert(client_id.clone(), client.clone());
+        clients.insert(client_id, client.clone());
 
         let state = state.clone();
 
@@ -195,15 +202,15 @@ async fn handle_ws(
     })
 }
 
-async fn verify(client_id: &str, state: &State) -> Option<DisconnectReason> {
-    if client_id.is_empty() || client_id.len() > Client::MAX_ID_LEN {
-        return Some(DisconnectReason::InvalidClientId);
-    }
+async fn verify(client_id_str: &str, state: &State) -> Result<Uuid, DisconnectReason> {
+    let Ok(client_id) = Uuid::try_parse(client_id_str) else {
+        return Err(DisconnectReason::InvalidClientId);
+    };
     let clients = state.clients.lock().await;
-    if clients.contains_key(client_id) {
-        return Some(DisconnectReason::ClientIdTaken);
+    if clients.contains_key(&client_id) {
+        return Err(DisconnectReason::ClientIdTaken);
     }
-    None
+    Ok(client_id)
 }
 
 async fn ws_loop(mut client: Client, mut client_rx: ClientRx, state: State) {
@@ -296,7 +303,7 @@ async fn handle_create_room(client: &mut Client, state: &State) {
         room_id,
         Room {
             id: room_id,
-            host_id: client.id.clone(),
+            host_id: client.id,
             guest_ids: HashSet::new(),
         },
     );
@@ -328,15 +335,15 @@ async fn handle_join_room(room_id: u32, client: &mut Client, state: &State) {
         return;
     };
 
-    room.guest_ids.insert(client.id.clone());
+    room.guest_ids.insert(client.id);
     client.joined_room(room.clone()).await;
 
-    host.guest_joined(client.id.clone()).await;
+    host.guest_joined(client.id).await;
 
     for guest_id in &room.guest_ids {
         if guest_id != &client.id {
             if let Some(guest) = clients.get_mut(guest_id) {
-                guest.guest_joined(client.id.clone()).await;
+                guest.guest_joined(client.id).await;
             } else {
                 warn!(
                     "Room {} contains guest id {guest_id}, but there is no client for them",
@@ -377,7 +384,7 @@ async fn handle_delete_room(room_id: u32, client: &mut Client, state: &State) {
 }
 
 async fn forward_to_client(
-    to_client_id: String,
+    to_client_id: Uuid,
     ws_msg: ws::Message,
     client: &mut Client,
     state: &State,
